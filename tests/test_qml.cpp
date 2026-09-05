@@ -88,6 +88,15 @@ void QmlUiTest::typesSelectsAndReorganises() {
              qPrintable(QStringLiteral("cursor=%1 nodes=%2")
                             .arg(source->property("cursorPosition").toInt())
                             .arg(controller.nodes().size())));
+    const int itemIndex = root->property("selectedIndex").toInt();
+    QTest::keyClick(window, Qt::Key_Question);
+    QTRY_VERIFY(root->property("keyHelpVisible").toBool());
+    const QImage keyHelpFrame = window->grabWindow();
+    QVERIFY(!keyHelpFrame.isNull());
+    QVERIFY(keyHelpFrame.save(QStringLiteral("/tmp/mustermark-keybindings-test.png")));
+    QTest::keyClick(window, Qt::Key_Question);
+    QTRY_VERIFY(!root->property("keyHelpVisible").toBool());
+    root->setProperty("selectedIndex", itemIndex);
     const QImage structuralFrame = window->grabWindow();
     QVERIFY(!structuralFrame.isNull());
     QVERIFY(structuralFrame.save(QStringLiteral("/tmp/mustermark-structural-test.png")));

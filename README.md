@@ -50,6 +50,7 @@ Mustermark starts in `INSERT` mode, where normal typing and text selection work 
 | Input | Action |
 | --- | --- |
 | `Esc` | Enter `NORMAL` mode and select the structure at the cursor |
+| `?` in `NORMAL` | Show or hide the keybindings reference |
 | `i`, `Enter`, or click | Return to `INSERT` mode |
 | `Enter` at the end of a list item | Continue its bullet, number, or unchecked task marker |
 | `J` / `K` | Select the next or previous structure |

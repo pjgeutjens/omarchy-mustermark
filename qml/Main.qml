@@ -14,6 +14,7 @@ ApplicationWindow {
     color: canvasColor
 
     property bool commandMode: false
+    property bool keyHelpVisible: false
     property bool syncingSource: false
     property int selectedIndex: -1
     property var pendingSelection: null
@@ -365,6 +366,86 @@ ApplicationWindow {
         }
     }
 
+    Rectangle {
+        id: keyHelp
+        objectName: "keyHelp"
+        anchors.fill: parent
+        visible: window.keyHelpVisible
+        z: 20
+        color: Qt.alpha(window.canvasColor, 0.96)
+
+        Column {
+            anchors.centerIn: parent
+            width: Math.min(560, parent.width - 80)
+            spacing: 16
+
+            Label {
+                text: "keybindings"
+                color: window.accent
+                font.family: "monospace"
+                font.pixelSize: 15
+                font.bold: true
+            }
+
+            Column {
+                width: parent.width
+                spacing: 7
+
+                Repeater {
+                    model: [
+                        { keys: "?", action: "show / hide keybindings" },
+                        { keys: "Esc", action: "normal mode / close keybindings" },
+                        { keys: "i  Enter", action: "insert mode" },
+                        { keys: "J  K", action: "next / previous structure" },
+                        { keys: "Shift+J  Shift+K", action: "move structure down / up" },
+                        { keys: "Shift+H  Shift+L", action: "promote / demote or outdent / indent" },
+                        { keys: "Space", action: "toggle task" },
+                        { keys: "Ctrl+N  Ctrl+O", action: "new / open" },
+                        { keys: "Ctrl+S", action: "save" },
+                        { keys: "Ctrl+Shift+S", action: "save as" },
+                        { keys: "Ctrl+Q", action: "quit" }
+                    ]
+
+                    Row {
+                        required property var modelData
+                        width: parent.width
+                        height: Math.max(bindingKeys.implicitHeight, bindingAction.implicitHeight)
+
+                        Label {
+                            id: bindingKeys
+                            width: 190
+                            text: modelData.keys
+                            color: window.foreground
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            font.bold: true
+                        }
+                        Label {
+                            id: bindingAction
+                            width: parent.width - bindingKeys.width
+                            text: modelData.action
+                            color: window.muted
+                            font.family: "monospace"
+                            font.pixelSize: 12
+                            wrapMode: Text.Wrap
+                        }
+                    }
+                }
+            }
+
+            Label {
+                text: "In INSERT, Enter continues a list marker when the cursor is at the end of an item."
+                width: parent.width
+                color: window.muted
+                font.family: "monospace"
+                font.pixelSize: 11
+                wrapMode: Text.Wrap
+            }
+        }
+
+        TapHandler { onTapped: window.keyHelpVisible = false }
+    }
+
     footer: Rectangle {
         implicitHeight: 31
         color: Qt.darker(window.canvasColor, 1.16)
@@ -628,6 +709,16 @@ ApplicationWindow {
     }
 
     Shortcut { sequence: "Escape"; enabled: !window.commandMode; onActivated: window.enterNormal() }
+    Shortcut {
+        sequence: "?"
+        enabled: window.commandMode
+        onActivated: window.keyHelpVisible = !window.keyHelpVisible
+    }
+    Shortcut {
+        sequence: "Escape"
+        enabled: window.keyHelpVisible
+        onActivated: window.keyHelpVisible = false
+    }
     Shortcut { sequence: "I"; enabled: window.commandMode; onActivated: window.enterInsert() }
     Shortcut { sequence: "Return"; enabled: window.commandMode; onActivated: window.enterInsert() }
     Shortcut { sequence: "J"; enabled: window.commandMode; onActivated: window.selectRelative(1) }
