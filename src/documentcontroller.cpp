@@ -214,6 +214,23 @@ bool DocumentController::applyAction(const QString &action, const QString &node,
     return true;
 }
 
+bool DocumentController::shiftLevel(const QString &action, const QString &node,
+                                    bool includeDescendants) {
+    const EditResult result = m_engine.apply(
+        m_document.source, m_document.revision, action, node,
+        {{QStringLiteral("scope"), includeDescendants ? QStringLiteral("subtree")
+                                                       : QStringLiteral("self")}});
+    if (!result.ok) {
+        setStatus(result.errorMessage);
+        return false;
+    }
+    setSource(result.source, true);
+    setStatus(QStringLiteral("%1 applied to %2")
+                  .arg(action, includeDescendants ? QStringLiteral("subtree")
+                                                  : QStringLiteral("selection")));
+    return true;
+}
+
 bool DocumentController::setHeadingLevel(const QString &node, int level) {
     const EditResult result = m_engine.apply(
         m_document.source, m_document.revision, QStringLiteral("set_heading_level"),

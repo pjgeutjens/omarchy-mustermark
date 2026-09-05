@@ -648,25 +648,85 @@ EditResult DocumentEngine::apply(const QByteArray &source, const QString &baseRe
         edits.append(QJsonObject{{QStringLiteral("startByte"), static_cast<double>(insertion)},
                       {QStringLiteral("endByte"), static_cast<double>(insertion)},
                       {QStringLiteral("text"), QString::fromUtf8(block)}});
-    } else if (action == QStringLiteral("indent") || action == QStringLiteral("outdent")) {
+    } else if (action == QStringLiteral("indent") || action == QStringLiteral("outdent") ||
+               ((action == QStringLiteral("promote") || action == QStringLiteral("demote")) &&
+                node.kind == NodeKind::Item)) {
         if (node.kind != NodeKind::Item)
             return {false, source, QStringLiteral("invalid_action"),
                     QStringLiteral("Only list items can be indented or outdented."), {}};
+        const bool legacyIndentAction = action == QStringLiteral("indent") ||
+                                        action == QStringLiteral("outdent");
+        const QString defaultScope = legacyIndentAction ? QStringLiteral("subtree")
+                                                        : QStringLiteral("self");
+        const QString scope = arguments.value(QStringLiteral("scope")).toString(defaultScope);
+        if (scope != QStringLiteral("self") && scope != QStringLiteral("subtree"))
+            return {false, source, QStringLiteral("invalid_scope"),
+                    QStringLiteral("Scope must be self or subtree."), {}};
+        const bool demoting = action == QStringLiteral("indent") || action == QStringLiteral("demote");
         bool shifted = false;
         const QByteArray original = source.mid(node.startByte, node.endByte - node.startByte);
-        const QByteArray replacement = shiftIndent(original, action == QStringLiteral("indent") ? 4 : -4,
-                                                   &shifted);
+        QByteArray replacement;
+        if (scope == QStringLiteral("subtree")) {
+            replacement = shiftIndent(original, demoting ? 4 : -4, &shifted);
+        } else {
+            const bool hasFinalNewline = original.endsWith('\n');
+            QList<QByteArray> itemLines = original.split('\n');
+            if (hasFinalNewline && !itemLines.isEmpty())
+                itemLines.removeLast();
+            shifted = true;
+            for (int lineIndex = 0; lineIndex < itemLines.size(); ++lineIndex) {
+                const int sourceLine = node.startLine + lineIndex;
+                bool belongsToChildList = false;
+                for (const int childIndex : node.children) {
+                    const Node &child = document.nodes.at(childIndex);
+                    if (child.kind != NodeKind::List)
+                        continue;
+                    const int firstChildLine = child.metadataLine > 0 ? child.metadataLine : child.startLine;
+                    if (sourceLine >= firstChildLine && sourceLine <= child.endLine) {
+                        belongsToChildList = true;
+                        break;
+                    }
+                }
+                if (belongsToChildList || itemLines[lineIndex].trimmed().isEmpty())
+                    continue;
+                if (demoting) {
+                    itemLines[lineIndex].prepend("    ");
+                } else {
+                    int remaining = 4;
+                    while (remaining > 0 && !itemLines[lineIndex].isEmpty() &&
+                           itemLines[lineIndex].at(0) == ' ') {
+                        itemLines[lineIndex].remove(0, 1);
+                        --remaining;
+                    }
+                    if (remaining != 0) {
+                        shifted = false;
+                        break;
+                    }
+                }
+            }
+            replacement = shifted ? itemLines.join('\n') : original;
+            if (shifted && hasFinalNewline)
+                replacement += '\n';
+        }
         if (!shifted)
             return {false, source, QStringLiteral("unsafe_rewrite"),
-                    QStringLiteral("The selected item cannot move one indentation level safely."), {}};
+                    demoting
+                        ? QStringLiteral("The selected item cannot be demoted one level safely.")
+                        : QStringLiteral("The selected item cannot be promoted one level safely."), {}};
         edits.append(QJsonObject{{QStringLiteral("startByte"), static_cast<double>(node.startByte)},
                       {QStringLiteral("endByte"), static_cast<double>(node.endByte)},
                       {QStringLiteral("text"), QString::fromUtf8(replacement)}});
     } else if (action == QStringLiteral("promote") || action == QStringLiteral("demote")) {
         if (node.kind != NodeKind::Heading)
             return {false, source, QStringLiteral("invalid_action"),
-                    QStringLiteral("Only headings can be promoted or demoted."), {}};
-        QByteArray block = source.mid(node.startByte, node.endByte - node.startByte);
+                    QStringLiteral("Only headings and list items can be promoted or demoted."), {}};
+        const QString scope = arguments.value(QStringLiteral("scope")).toString(QStringLiteral("self"));
+        if (scope != QStringLiteral("self") && scope != QStringLiteral("subtree"))
+            return {false, source, QStringLiteral("invalid_scope"),
+                    QStringLiteral("Scope must be self or subtree."), {}};
+        const qsizetype editEnd = scope == QStringLiteral("self")
+                                      ? lines.end(node.startLine) : node.endByte;
+        QByteArray block = source.mid(node.startByte, editEnd - node.startByte);
         const bool finalNewline = block.endsWith('\n');
         QList<QByteArray> blockLines = block.split('\n');
         if (finalNewline) blockLines.removeLast();
@@ -692,7 +752,7 @@ EditResult DocumentEngine::apply(const QByteArray &source, const QString &baseRe
         QByteArray replacement = blockLines.join('\n');
         if (finalNewline) replacement += '\n';
         edits.append(QJsonObject{{QStringLiteral("startByte"), static_cast<double>(node.startByte)},
-                      {QStringLiteral("endByte"), static_cast<double>(node.endByte)},
+                      {QStringLiteral("endByte"), static_cast<double>(editEnd)},
                       {QStringLiteral("text"), QString::fromUtf8(replacement)}});
     } else if (action == QStringLiteral("set_heading_level")) {
         if (node.kind != NodeKind::Heading)

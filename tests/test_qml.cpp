@@ -142,7 +142,7 @@ void QmlUiTest::typesSelectsAndReorganises() {
     const QImage headingFrame = window->grabWindow();
     QVERIFY(!headingFrame.isNull());
     QVERIFY(headingFrame.save(QStringLiteral("/tmp/mustermark-heading-test.png")));
-    QTest::keyClick(window, Qt::Key_L, Qt::ShiftModifier);
+    QTest::keyClick(window, Qt::Key_L, Qt::ControlModifier | Qt::ShiftModifier);
     QTRY_VERIFY(controller.source().startsWith(QStringLiteral("## Alpha")));
     QVERIFY(controller.source().contains(QStringLiteral("### Child")));
 }

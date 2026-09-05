@@ -93,8 +93,8 @@ mustermark api --stdio
 ### Structural controls
 
 - Put the available actions in the footer. Do not open a menu when a structure is selected.
-- A heading gets move up/down, exact `H1` through `H6`, and branch promote/demote actions. Exact heading level changes only the selected title. Branch actions change that title and every descendant title by the same amount.
-- A list item gets move up/down among its siblings, outdent/indent, and task toggle when applicable. Nested children move with their item.
+- A heading gets move up/down, exact `H1` through `H6`, and promote/demote actions. Exact heading level changes only the selected title. Promotion and demotion can affect either that title or its descendant titles too.
+- A list item gets move up/down among its siblings, promote/demote, and task toggle when applicable. Promotion and demotion can affect either that item or its descendant items too.
 - A paragraph, quote, code block, or other top-level block gets move up/down within its section.
 - Disable or omit actions that cannot apply to the current selection.
 
@@ -105,7 +105,8 @@ mustermark api --stdio
 - Clicking in source: enter Insert mode.
 - `J` / `K`: select the next or previous structure.
 - `Shift+J` / `Shift+K`: move the selected subtree down or up.
-- `Shift+H` / `Shift+L`: promote or outdent; demote or indent.
+- `Shift+H` / `Shift+L`: promote or demote the selected heading or list item.
+- `Ctrl+Shift+H` / `Ctrl+Shift+L`: promote or demote the selection and its descendants.
 - `Space`: toggle a task.
 
 Always call the modes `NORMAL` and `INSERT`. Do not use `COMMAND` as the visible name.

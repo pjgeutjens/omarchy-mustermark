@@ -156,7 +156,7 @@ int Cli::run(const QStringList &arguments) {
             << "Usage:\n"
             << "  mustermark FILE.md\n"
             << "  mustermark inspect|validate|track|repair|untrack FILE.md\n"
-            << "  mustermark apply FILE.md ACTION NODE [--target=ID] [--label=LABEL] [--text=TEXT] [--level=N]\n"
+            << "  mustermark apply FILE.md ACTION NODE [--scope=self|subtree] [--target=ID] [--label=LABEL] [--text=TEXT] [--level=N]\n"
             << "  mustermark api --stdio\n";
         return command == QStringLiteral("--help") ? 0 : 64;
     }
@@ -177,7 +177,8 @@ int Cli::run(const QStringList &arguments) {
         }
         QJsonObject params{{QStringLiteral("node"), arguments.at(4)}};
         for (const QString &name : {QStringLiteral("target"), QStringLiteral("label"),
-                                    QStringLiteral("text"), QStringLiteral("baseRevision")}) {
+                                    QStringLiteral("text"), QStringLiteral("baseRevision"),
+                                    QStringLiteral("scope")}) {
             const QString value = argumentValue(arguments, name);
             if (!value.isEmpty()) params.insert(name, value);
         }

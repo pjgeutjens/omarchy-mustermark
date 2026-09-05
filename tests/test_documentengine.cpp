@@ -22,7 +22,9 @@ private slots:
     void labelsRequireTracking();
     void movesWholeItemSubtree();
     void setsOnlySelectedHeadingLevel();
+    void promotesOnlySelectedHeading();
     void changesWholeHeadingBranchLevel();
+    void promotesAndDemotesListItems();
     void rejectsHeadingBranchBeyondLevelSix();
     void rejectsStaleRevision();
     void repairsDuplicateIds();
@@ -163,15 +165,76 @@ void DocumentEngineTest::setsOnlySelectedHeadingLevel() {
     QCOMPARE(changed.source, QByteArray("# Parent\n\n### Child\n\nBody.\n"));
 }
 
+void DocumentEngineTest::promotesOnlySelectedHeading() {
+    const QByteArray source = "## Parent\n\n### Child\n\nBody.\n";
+    DocumentEngine engine;
+    const Document document = engine.parse(source);
+    const Node &parent = document.nodes.at(0);
+    const EditResult changed = engine.apply(
+        source, document.revision, QStringLiteral("promote"), parent.ref);
+    QVERIFY2(changed.ok, qPrintable(changed.errorMessage));
+    QCOMPARE(changed.source, QByteArray("# Parent\n\n### Child\n\nBody.\n"));
+}
+
 void DocumentEngineTest::changesWholeHeadingBranchLevel() {
     const QByteArray source = "## Parent\n\n### Child\n\nBody.\n";
     DocumentEngine engine;
     const Document document = engine.parse(source);
     const Node &parent = document.nodes.at(0);
     const EditResult changed = engine.apply(
-        source, document.revision, QStringLiteral("demote"), parent.ref);
+        source, document.revision, QStringLiteral("demote"), parent.ref,
+        {{QStringLiteral("scope"), QStringLiteral("subtree")}});
     QVERIFY2(changed.ok, qPrintable(changed.errorMessage));
     QCOMPARE(changed.source, QByteArray("### Parent\n\n#### Child\n\nBody.\n"));
+}
+
+void DocumentEngineTest::promotesAndDemotesListItems() {
+    const QByteArray nested =
+        "- parent\n"
+        "    - child\n"
+        "        - grandchild\n";
+    DocumentEngine engine;
+    Document document = engine.parse(nested);
+    const Node &nestedChild = *std::find_if(
+        document.nodes.begin(), document.nodes.end(), [](const Node &node) {
+            return node.kind == NodeKind::Item && node.text == QStringLiteral("child");
+        });
+
+    EditResult changed = engine.apply(
+        nested, document.revision, QStringLiteral("promote"), nestedChild.ref);
+    QVERIFY2(changed.ok, qPrintable(changed.errorMessage));
+    QCOMPARE(changed.source,
+             QByteArray("- parent\n- child\n        - grandchild\n"));
+
+    changed = engine.apply(
+        nested, document.revision, QStringLiteral("promote"), nestedChild.ref,
+        {{QStringLiteral("scope"), QStringLiteral("subtree")}});
+    QVERIFY2(changed.ok, qPrintable(changed.errorMessage));
+    QCOMPARE(changed.source,
+             QByteArray("- parent\n- child\n    - grandchild\n"));
+
+    const QByteArray siblings =
+        "- parent\n"
+        "- child\n"
+        "    - grandchild\n";
+    document = engine.parse(siblings);
+    const Node &topChild = *std::find_if(
+        document.nodes.begin(), document.nodes.end(), [](const Node &node) {
+            return node.kind == NodeKind::Item && node.text == QStringLiteral("child");
+        });
+
+    changed = engine.apply(
+        siblings, document.revision, QStringLiteral("demote"), topChild.ref);
+    QVERIFY2(changed.ok, qPrintable(changed.errorMessage));
+    QCOMPARE(changed.source,
+             QByteArray("- parent\n    - child\n    - grandchild\n"));
+
+    changed = engine.apply(
+        siblings, document.revision, QStringLiteral("demote"), topChild.ref,
+        {{QStringLiteral("scope"), QStringLiteral("subtree")}});
+    QVERIFY2(changed.ok, qPrintable(changed.errorMessage));
+    QCOMPARE(changed.source,
+             QByteArray("- parent\n    - child\n        - grandchild\n"));
 }
 
 void DocumentEngineTest::rejectsHeadingBranchBeyondLevelSix() {
@@ -180,7 +243,8 @@ void DocumentEngineTest::rejectsHeadingBranchBeyondLevelSix() {
     const Document document = engine.parse(source);
     const Node &parent = document.nodes.at(0);
     const EditResult changed = engine.apply(
-        source, document.revision, QStringLiteral("demote"), parent.ref);
+        source, document.revision, QStringLiteral("demote"), parent.ref,
+        {{QStringLiteral("scope"), QStringLiteral("subtree")}});
     QVERIFY(!changed.ok);
     QCOMPARE(changed.errorCode, QStringLiteral("unsafe_rewrite"));
     QCOMPARE(changed.source, source);

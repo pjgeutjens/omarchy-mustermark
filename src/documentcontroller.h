@@ -48,6 +48,8 @@ public:
     Q_INVOKABLE bool applyAction(const QString &action, const QString &node,
                                  const QString &target = {}, const QString &label = {},
                                  const QString &text = {});
+    Q_INVOKABLE bool shiftLevel(const QString &action, const QString &node,
+                                bool includeDescendants);
     Q_INVOKABLE bool setHeadingLevel(const QString &node, int level);
     Q_INVOKABLE void checkExternalChange();
 

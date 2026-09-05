@@ -55,12 +55,13 @@ Mustermark starts in `INSERT` mode, where normal typing and text selection work 
 | `Enter` at the end of a list item | Continue its bullet, number, or unchecked task marker |
 | `J` / `K` | Select the next or previous structure |
 | `Shift+J` / `Shift+K` | Move the selected structure down or up |
-| `Shift+H` / `Shift+L` | Promote or demote a heading branch; outdent or indent a list item |
+| `Shift+H` / `Shift+L` | Promote or demote the selected heading or list item |
+| `Ctrl+Shift+H` / `Ctrl+Shift+L` | Promote or demote it together with its child headings or list items |
 | `Space` | Toggle the selected task item |
 | `Ctrl+S` | Save immediately |
 | `Ctrl+O` | Open a Markdown file |
 
-The footer exposes the same structural actions to the mouse. For headings, `title H1` through `H6` changes only the selected heading. `branch −/+` shifts that heading and its descendant headings while preserving their relative levels.
+The footer exposes the same structural actions to the mouse. For headings, `title H1` through `H6` changes only the selected heading. Turn on `+children` before `promote` or `demote` to shift the selected structure and its descendants while preserving their relative levels.
 
 ## Command line and local API
 
@@ -70,9 +71,11 @@ The executable also exposes the parser and safe source mutations:
 mustermark inspect FILE.md
 mustermark validate FILE.md
 mustermark track|repair|untrack FILE.md
-mustermark apply FILE.md ACTION NODE [--target=ID] [--label=LABEL] [--text=TEXT] [--level=N]
+mustermark apply FILE.md ACTION NODE [--scope=self|subtree] [--target=ID] [--label=LABEL] [--text=TEXT] [--level=N]
 mustermark api --stdio
 ```
+
+`promote` and `demote` use `--scope=self` by default. Pass `--scope=subtree` to apply the change to descendant headings or list items too.
 
 `mustermark api --stdio` accepts newline-delimited JSON-RPC 2.0. Mutations use source ranges and revision checks. Mustermark refuses a rewrite when it cannot preserve the Markdown safely.
 

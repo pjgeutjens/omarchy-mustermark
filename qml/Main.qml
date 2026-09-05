@@ -15,6 +15,7 @@ ApplicationWindow {
 
     property bool commandMode: false
     property bool keyHelpVisible: false
+    property bool includeDescendants: false
     property bool syncingSource: false
     property int selectedIndex: -1
     property var pendingSelection: null
@@ -184,6 +185,15 @@ ApplicationWindow {
         return true
     }
 
+    function canShiftLevel(delta, includeChildren) {
+        const selected = currentNode()
+        if (!selected) return false
+        if (selected.kind === "heading")
+            return includeChildren ? canShiftBranch(delta)
+                                   : (delta < 0 ? selected.level > 1 : selected.level < 6)
+        return selected.kind === "item"
+    }
+
     function moveRelative(delta) {
         const selected = currentNode()
         if (!selected) return
@@ -203,6 +213,13 @@ ApplicationWindow {
         if (!selected) return
         rememberSelection(selected.startLine)
         documentController.applyAction(action, selected.identity)
+    }
+
+    function shiftSelected(action, includeChildren) {
+        const selected = currentNode()
+        if (!selected || (selected.kind !== "heading" && selected.kind !== "item")) return
+        rememberSelection(selected.startLine)
+        documentController.shiftLevel(action, selected.identity, includeChildren)
     }
 
     function setSelectedHeadingLevel(level) {
@@ -398,7 +415,8 @@ ApplicationWindow {
                         { keys: "i  Enter", action: "insert mode" },
                         { keys: "J  K", action: "next / previous structure" },
                         { keys: "Shift+J  Shift+K", action: "move structure down / up" },
-                        { keys: "Shift+H  Shift+L", action: "promote / demote or outdent / indent" },
+                        { keys: "Shift+H  Shift+L", action: "promote / demote selection" },
+                        { keys: "Ctrl+Shift+H/L", action: "promote / demote with children" },
                         { keys: "Space", action: "toggle task" },
                         { keys: "Ctrl+N  Ctrl+O", action: "new / open" },
                         { keys: "Ctrl+S", action: "save" },
@@ -572,56 +590,29 @@ ApplicationWindow {
                             onTriggered: window.setSelectedHeadingLevel(index + 1)
                         }
                     }
-                    Label {
+                    FooterAction {
                         visible: window.commandMode && window.selectedNode &&
-                                 window.selectedNode.kind === "heading"
-                        height: parent.height
-                        verticalAlignment: Text.AlignVCenter
-                        leftPadding: 7
-                        rightPadding: 1
-                        text: "branch"
-                        color: window.muted
-                        font.family: "monospace"
-                        font.pixelSize: 10
+                                 (window.selectedNode.kind === "heading" ||
+                                  window.selectedNode.kind === "item")
+                        label: "+children"
+                        active: window.includeDescendants
+                        onTriggered: window.includeDescendants = !window.includeDescendants
                     }
                     FooterAction {
                         visible: window.commandMode && window.selectedNode &&
-                                 window.selectedNode.kind === "heading"
-                        label: "−"
-                        enabled: window.canShiftBranch(-1)
-                        onTriggered: window.applySelected("promote")
+                                 (window.selectedNode.kind === "heading" ||
+                                  window.selectedNode.kind === "item")
+                        label: "promote"
+                        enabled: window.canShiftLevel(-1, window.includeDescendants)
+                        onTriggered: window.shiftSelected("promote", window.includeDescendants)
                     }
                     FooterAction {
                         visible: window.commandMode && window.selectedNode &&
-                                 window.selectedNode.kind === "heading"
-                        label: "+"
-                        enabled: window.canShiftBranch(1)
-                        onTriggered: window.applySelected("demote")
-                    }
-
-                    Label {
-                        visible: window.commandMode && window.selectedNode &&
-                                 window.selectedNode.kind === "item"
-                        height: parent.height
-                        verticalAlignment: Text.AlignVCenter
-                        leftPadding: 7
-                        rightPadding: 1
-                        text: "nest"
-                        color: window.muted
-                        font.family: "monospace"
-                        font.pixelSize: 10
-                    }
-                    FooterAction {
-                        visible: window.commandMode && window.selectedNode &&
-                                 window.selectedNode.kind === "item"
-                        label: "←"
-                        onTriggered: window.applySelected("outdent")
-                    }
-                    FooterAction {
-                        visible: window.commandMode && window.selectedNode &&
-                                 window.selectedNode.kind === "item"
-                        label: "→"
-                        onTriggered: window.applySelected("indent")
+                                 (window.selectedNode.kind === "heading" ||
+                                  window.selectedNode.kind === "item")
+                        label: "demote"
+                        enabled: window.canShiftLevel(1, window.includeDescendants)
+                        onTriggered: window.shiftSelected("demote", window.includeDescendants)
                     }
                     FooterAction {
                         objectName: "taskAction"
@@ -727,13 +718,23 @@ ApplicationWindow {
     Shortcut { sequence: "Shift+K"; enabled: window.commandMode; onActivated: window.moveRelative(-1) }
     Shortcut {
         sequence: "Shift+H"
-        enabled: window.commandMode && window.selectedNode
-        onActivated: window.applySelected(window.selectedNode.kind === "heading" ? "promote" : "outdent")
+        enabled: window.commandMode && window.canShiftLevel(-1, false)
+        onActivated: window.shiftSelected("promote", false)
     }
     Shortcut {
         sequence: "Shift+L"
-        enabled: window.commandMode && window.selectedNode
-        onActivated: window.applySelected(window.selectedNode.kind === "heading" ? "demote" : "indent")
+        enabled: window.commandMode && window.canShiftLevel(1, false)
+        onActivated: window.shiftSelected("demote", false)
+    }
+    Shortcut {
+        sequence: "Ctrl+Shift+H"
+        enabled: window.commandMode && window.canShiftLevel(-1, true)
+        onActivated: window.shiftSelected("promote", true)
+    }
+    Shortcut {
+        sequence: "Ctrl+Shift+L"
+        enabled: window.commandMode && window.canShiftLevel(1, true)
+        onActivated: window.shiftSelected("demote", true)
     }
     Shortcut {
         sequence: "Space"
