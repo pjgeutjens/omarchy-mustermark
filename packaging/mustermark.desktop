@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Mustermark
+GenericName=Structured Markdown Editor
+Comment=Write and reorganise Markdown headings and lists
+Exec=mustermark %f
+Icon=mustermark
+Terminal=false
+Categories=Office;TextEditor;
+MimeType=text/markdown;text/x-markdown;text/plain;
+Keywords=markdown;headings;lists;tasks;editor;
+StartupWMClass=mustermark

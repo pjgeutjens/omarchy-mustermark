@@ -1,0 +1,74 @@
+cmake_minimum_required(VERSION 3.21)
+
+project(mustermark VERSION 0.1.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+include(CTest)
+find_package(Qt6 6.6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 Test)
+
+set(CMARK_GFM_ROOT "$ENV{CMARK_GFM_ROOT}" CACHE PATH "Prefix containing cmark-gfm")
+find_path(CMARK_GFM_INCLUDE_DIR cmark-gfm.h
+    HINTS "${CMARK_GFM_ROOT}/include" "${CMARK_GFM_ROOT}/usr/include")
+find_library(CMARK_GFM_LIBRARY cmark-gfm
+    HINTS "${CMARK_GFM_ROOT}/lib" "${CMARK_GFM_ROOT}/usr/lib")
+find_library(CMARK_GFM_EXTENSIONS_LIBRARY cmark-gfm-extensions
+    HINTS "${CMARK_GFM_ROOT}/lib" "${CMARK_GFM_ROOT}/usr/lib")
+
+if(NOT CMARK_GFM_INCLUDE_DIR OR NOT CMARK_GFM_LIBRARY OR NOT CMARK_GFM_EXTENSIONS_LIBRARY)
+    message(FATAL_ERROR "cmark-gfm was not found. Install cmark-gfm or set CMARK_GFM_ROOT.")
+endif()
+
+add_library(mustermark_core STATIC
+    src/documentengine.cpp
+    src/documentengine.h
+    src/filedocument.cpp
+    src/filedocument.h
+)
+target_include_directories(mustermark_core PUBLIC src PRIVATE "${CMARK_GFM_INCLUDE_DIR}")
+target_link_libraries(mustermark_core
+    PUBLIC Qt6::Core
+    PRIVATE "${CMARK_GFM_LIBRARY}" "${CMARK_GFM_EXTENSIONS_LIBRARY}")
+target_compile_options(mustermark_core PRIVATE -Wall -Wextra -Wpedantic)
+
+qt_add_executable(mustermark
+    src/main.cpp
+    src/documentcontroller.cpp
+    src/documentcontroller.h
+    src/markdownhighlighter.cpp
+    src/markdownhighlighter.h
+    src/cli.cpp
+    src/cli.h
+    resources.qrc
+)
+target_link_libraries(mustermark PRIVATE
+    mustermark_core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2)
+
+install(TARGETS mustermark RUNTIME DESTINATION bin)
+install(FILES packaging/mustermark.desktop DESTINATION share/applications)
+install(FILES packaging/mustermark.svg DESTINATION share/icons/hicolor/scalable/apps)
+install(FILES LICENSE DESTINATION share/licenses/mustermark)
+
+if(BUILD_TESTING)
+    add_executable(mustermark_tests tests/test_documentengine.cpp)
+    target_link_libraries(mustermark_tests PRIVATE mustermark_core Qt6::Test)
+    add_test(NAME mustermark_tests COMMAND mustermark_tests)
+
+    qt_add_executable(mustermark_qml_tests
+        tests/test_qml.cpp
+        src/documentcontroller.cpp
+        src/documentcontroller.h
+        src/markdownhighlighter.cpp
+        src/markdownhighlighter.h
+        resources.qrc
+    )
+    target_link_libraries(mustermark_qml_tests PRIVATE
+        mustermark_core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::Test)
+    add_test(NAME mustermark_qml_tests COMMAND mustermark_qml_tests)
+    set_tests_properties(mustermark_qml_tests PROPERTIES ENVIRONMENT
+        "QT_QPA_PLATFORM=offscreen;QT_QPA_PLATFORMTHEME=generic;QT_QUICK_BACKEND=software;QT_STYLE_OVERRIDE=Basic;XDG_DATA_HOME=/tmp/mustermark-test-data")
+endif()

@@ -1,0 +1,683 @@
+import QtQuick
+import QtQuick.Controls
+import QtQuick.Layouts
+import QtQuick.Dialogs
+
+ApplicationWindow {
+    id: window
+    width: 1180
+    height: 760
+    minimumWidth: 760
+    minimumHeight: 440
+    visible: true
+    title: (documentController.modified ? "● " : "") + documentController.title
+    color: canvasColor
+
+    property bool commandMode: false
+    property bool syncingSource: false
+    property int selectedIndex: -1
+    property var pendingSelection: null
+
+    readonly property color canvasColor: documentController.theme.background
+    readonly property color foreground: documentController.theme.foreground
+    readonly property color accent: documentController.theme.accent
+    readonly property color muted: documentController.theme.muted
+    readonly property color selection: documentController.theme.selection
+    readonly property var selectedNode: selectedIndex >= 0 && selectedIndex < documentController.nodes.length
+                                        ? documentController.nodes[selectedIndex] : null
+    readonly property int cursorLine: lineForPosition(sourceArea.cursorPosition)
+    readonly property int cursorColumn: {
+        const previousBreak = sourceArea.text.lastIndexOf("\n", sourceArea.cursorPosition - 1)
+        return sourceArea.cursorPosition - previousBreak
+    }
+
+    function currentNode() {
+        const nodes = documentController.nodes
+        return selectedIndex >= 0 && selectedIndex < nodes.length ? nodes[selectedIndex] : null
+    }
+
+    function lineForPosition(position) {
+        let line = 1
+        const limit = Math.min(Math.max(position, 0), sourceArea.text.length)
+        for (let index = 0; index < limit; ++index)
+            if (sourceArea.text.charCodeAt(index) === 10) ++line
+        return line
+    }
+
+    function positionForLine(line) {
+        if (line <= 1) return 0
+        let position = 0
+        for (let current = 1; current < line; ++current) {
+            position = sourceArea.text.indexOf("\n", position)
+            if (position < 0) return sourceArea.text.length
+            ++position
+        }
+        return position
+    }
+
+    function nodePriority(node) {
+        if (node.kind === "item") return 3
+        if (node.kind === "heading") return 2
+        return 1
+    }
+
+    function bestNodeAtLine(line) {
+        const nodes = documentController.nodes
+        let best = -1
+        let bestSpan = Number.MAX_SAFE_INTEGER
+        let bestPriority = -1
+        for (let index = 0; index < nodes.length; ++index) {
+            const node = nodes[index]
+            if (line < node.startLine || line > node.endLine) continue
+            const span = node.endLine - node.startLine
+            const priority = nodePriority(node)
+            if (span < bestSpan || (span === bestSpan && priority > bestPriority)) {
+                best = index
+                bestSpan = span
+                bestPriority = priority
+            }
+        }
+        return best
+    }
+
+    function selectIndex(index, reveal) {
+        if (index < 0 || index >= documentController.nodes.length) {
+            selectedIndex = -1
+            markdownHighlighter.setStructuralRange(-1, -1)
+            return
+        }
+        selectedIndex = index
+        const node = documentController.nodes[index]
+        markdownHighlighter.setStructuralRange(node.startLine, node.endLine)
+        if (reveal) {
+            const rectangle = sourceArea.positionToRectangle(positionForLine(node.startLine))
+            const flickable = editorScroll.contentItem
+            if (rectangle.y < flickable.contentY + 18 ||
+                    rectangle.y > flickable.contentY + editorScroll.availableHeight - 50)
+                flickable.contentY = Math.max(0, rectangle.y - editorScroll.availableHeight / 3)
+        }
+    }
+
+    function selectAtPosition(position, reveal) {
+        selectIndex(bestNodeAtLine(lineForPosition(position)), reveal)
+    }
+
+    function selectRelative(delta) {
+        const count = documentController.nodes.length
+        if (!count) return
+        const next = selectedIndex < 0
+                     ? (delta > 0 ? 0 : count - 1)
+                     : Math.max(0, Math.min(count - 1, selectedIndex + delta))
+        selectIndex(next, true)
+    }
+
+    function rememberSelection(fallbackLine) {
+        const node = currentNode()
+        if (!node) return
+        pendingSelection = {
+            "id": node.id,
+            "kind": node.kind,
+            "text": node.text,
+            "line": fallbackLine || node.startLine
+        }
+    }
+
+    function restoreSelection() {
+        if (!commandMode) {
+            selectIndex(-1, false)
+            pendingSelection = null
+            return
+        }
+        const nodes = documentController.nodes
+        const wanted = pendingSelection
+        let best = -1
+        let distance = Number.MAX_SAFE_INTEGER
+        if (wanted) {
+            for (let index = 0; index < nodes.length; ++index) {
+                const node = nodes[index]
+                if (wanted.id && node.id === wanted.id) {
+                    best = index
+                    break
+                }
+                if (node.kind === wanted.kind && node.text === wanted.text) {
+                    const candidateDistance = Math.abs(node.startLine - wanted.line)
+                    if (candidateDistance < distance) {
+                        best = index
+                        distance = candidateDistance
+                    }
+                }
+            }
+        }
+        if (best < 0)
+            best = bestNodeAtLine(lineForPosition(sourceArea.cursorPosition))
+        selectIndex(best, false)
+        pendingSelection = null
+    }
+
+    function compatible(a, b) {
+        if (!a || !b || a.kind !== b.kind) return false
+        if (a.parent !== b.parent) return false
+        return a.kind !== "heading" || a.level === b.level
+    }
+
+    function canMove(delta) {
+        const selected = currentNode()
+        if (!selected) return false
+        const nodes = documentController.nodes
+        for (let index = selectedIndex + delta; index >= 0 && index < nodes.length; index += delta)
+            if (compatible(selected, nodes[index])) return true
+        return false
+    }
+
+    function canShiftBranch(delta) {
+        const selected = currentNode()
+        if (!selected || selected.kind !== "heading") return false
+        const nodes = documentController.nodes
+        for (let index = 0; index < nodes.length; ++index) {
+            const node = nodes[index]
+            if (node.kind !== "heading" || node.startLine < selected.startLine ||
+                    node.startLine > selected.endLine) continue
+            if ((delta < 0 && node.level <= 1) || (delta > 0 && node.level >= 6))
+                return false
+        }
+        return true
+    }
+
+    function moveRelative(delta) {
+        const selected = currentNode()
+        if (!selected) return
+        const nodes = documentController.nodes
+        let targetIndex = selectedIndex + delta
+        while (targetIndex >= 0 && targetIndex < nodes.length &&
+               !compatible(selected, nodes[targetIndex]))
+            targetIndex += delta
+        if (targetIndex < 0 || targetIndex >= nodes.length) return
+        rememberSelection(nodes[targetIndex].startLine)
+        documentController.applyAction(delta < 0 ? "move_before" : "move_after",
+                                       selected.identity, nodes[targetIndex].identity)
+    }
+
+    function applySelected(action) {
+        const selected = currentNode()
+        if (!selected) return
+        rememberSelection(selected.startLine)
+        documentController.applyAction(action, selected.identity)
+    }
+
+    function setSelectedHeadingLevel(level) {
+        const selected = currentNode()
+        if (!selected || selected.kind !== "heading") return
+        rememberSelection(selected.startLine)
+        documentController.setHeadingLevel(selected.identity, level)
+    }
+
+    function commitSource() {
+        sourceParseTimer.stop()
+        documentController.updateSource(sourceArea.text)
+    }
+
+    function continueListItem() {
+        if (sourceArea.selectionStart !== sourceArea.selectionEnd) return false
+        const position = sourceArea.cursorPosition
+        const lineStart = sourceArea.text.lastIndexOf("\n", position - 1) + 1
+        let lineEnd = sourceArea.text.indexOf("\n", position)
+        if (lineEnd < 0) lineEnd = sourceArea.text.length
+        if (position !== lineEnd) return false
+
+        const line = sourceArea.text.slice(lineStart, lineEnd)
+        const bullet = /^(\s*)([-+*])(\s+)(?:\[([ xX])\](\s+))?(.+)$/.exec(line)
+        const ordered = /^(\s*)(\d+)([.)])(\s+)(?:\[([ xX])\](\s+))?(.+)$/.exec(line)
+        let prefix = ""
+        if (bullet) {
+            prefix = bullet[1] + bullet[2] + bullet[3]
+            if (bullet[4] !== undefined) prefix += "[ ]" + bullet[5]
+        } else if (ordered) {
+            prefix = ordered[1] + (Number(ordered[2]) + 1) + ordered[3] + ordered[4]
+            if (ordered[5] !== undefined) prefix += "[ ]" + ordered[6]
+        } else {
+            return false
+        }
+
+        const insertion = "\n" + prefix
+        sourceArea.insert(position, insertion)
+        sourceArea.cursorPosition = position + insertion.length
+        return true
+    }
+
+    function enterNormal() {
+        const position = sourceArea.cursorPosition
+        commitSource()
+        selectAtPosition(position, false)
+        commandMode = true
+        structureLayer.forceActiveFocus()
+    }
+
+    function enterInsert(position) {
+        commandMode = false
+        selectIndex(-1, false)
+        sourceArea.forceActiveFocus()
+        if (position !== undefined)
+            sourceArea.cursorPosition = Math.max(0, Math.min(position, sourceArea.length))
+    }
+
+    function saveNow() {
+        commitSource()
+        if (documentController.filePath)
+            documentController.save()
+        else
+            saveDialog.open()
+    }
+
+    component FooterAction: Rectangle {
+        id: actionRoot
+        required property string label
+        property bool active: false
+        signal triggered()
+        implicitWidth: actionLabel.implicitWidth + 14
+        implicitHeight: 30
+        color: active ? Qt.alpha(window.accent, 0.24)
+                      : actionHover.hovered && enabled ? Qt.alpha(window.foreground, 0.08)
+                                                      : "transparent"
+        opacity: enabled ? 1 : 0.32
+        Label {
+            id: actionLabel
+            anchors.centerIn: parent
+            text: actionRoot.label
+            color: actionRoot.active ? window.accent : window.foreground
+            font.family: "monospace"
+            font.pixelSize: 11
+            font.bold: actionRoot.active
+        }
+        HoverHandler { id: actionHover }
+        TapHandler {
+            enabled: actionRoot.enabled
+            onTapped: actionRoot.triggered()
+        }
+    }
+
+    ScrollView {
+        id: editorScroll
+        anchors.fill: parent
+        clip: true
+        ScrollBar.horizontal.policy: ScrollBar.AsNeeded
+        ScrollBar.vertical.policy: ScrollBar.AsNeeded
+
+        TextArea {
+            id: sourceArea
+            objectName: "sourceArea"
+            width: editorScroll.availableWidth
+            height: Math.max(editorScroll.availableHeight, contentHeight + topPadding + bottomPadding)
+            leftPadding: Math.max(42, (width - 1080) / 2)
+            rightPadding: leftPadding
+            topPadding: 30
+            bottomPadding: 60
+            color: window.foreground
+            selectionColor: window.accent
+            selectedTextColor: window.canvasColor
+            font.family: "monospace"
+            font.pixelSize: 17
+            wrapMode: TextEdit.Wrap
+            selectByMouse: true
+            persistentSelection: true
+            readOnly: window.commandMode
+            background: Rectangle { color: "transparent" }
+
+            onTextChanged: {
+                if (!window.syncingSource) sourceParseTimer.restart()
+            }
+            Keys.onPressed: function(event) {
+                if (!window.commandMode &&
+                        (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) &&
+                        event.modifiers === Qt.NoModifier && window.continueListItem())
+                    event.accepted = true
+            }
+
+            Component.onCompleted: {
+                window.syncingSource = true
+                text = documentController.source
+                window.syncingSource = false
+                markdownHighlighter.attach(textDocument)
+                markdownHighlighter.setColors(window.foreground, window.muted, window.accent)
+                forceActiveFocus()
+            }
+
+            FocusScope {
+                id: structureLayer
+                anchors.fill: parent
+                visible: window.commandMode
+                focus: visible
+
+                MouseArea {
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    acceptedButtons: Qt.LeftButton
+                    cursorShape: Qt.IBeamCursor
+                    onPositionChanged: function(mouse) {
+                        window.selectAtPosition(sourceArea.positionAt(mouse.x, mouse.y), false)
+                    }
+                    onClicked: function(mouse) {
+                        const position = sourceArea.positionAt(mouse.x, mouse.y)
+                        window.selectAtPosition(position, false)
+                        window.enterInsert(position)
+                    }
+                }
+            }
+        }
+    }
+
+    footer: Rectangle {
+        implicitHeight: 31
+        color: Qt.darker(window.canvasColor, 1.16)
+        border.color: Qt.alpha(window.foreground, 0.08)
+        border.width: 1
+
+        RowLayout {
+            anchors.fill: parent
+            spacing: 0
+
+            Rectangle {
+                Layout.fillHeight: true
+                implicitWidth: 76
+                color: window.commandMode ? window.accent : window.selection
+                Label {
+                    anchors.centerIn: parent
+                    text: window.commandMode ? "NORMAL" : "INSERT"
+                    color: window.commandMode ? window.canvasColor : window.foreground
+                    font.family: "monospace"
+                    font.bold: true
+                    font.pixelSize: 11
+                }
+                TapHandler {
+                    onTapped: window.commandMode ? window.enterInsert() : window.enterNormal()
+                }
+            }
+
+            FooterAction {
+                label: "new"
+                onTriggered: {
+                    documentController.newDocument()
+                    window.enterInsert(0)
+                }
+            }
+            FooterAction { label: "open"; onTriggered: openDialog.open() }
+            FooterAction { label: "save"; onTriggered: window.saveNow() }
+
+            Rectangle {
+                implicitWidth: 1
+                Layout.fillHeight: true
+                Layout.topMargin: 7
+                Layout.bottomMargin: 7
+                color: Qt.alpha(window.foreground, 0.15)
+            }
+
+            Flickable {
+                id: actionStrip
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                contentWidth: contextActions.implicitWidth
+                contentHeight: height
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+
+                Row {
+                    id: contextActions
+                    height: parent.height
+                    spacing: 0
+
+                    Label {
+                        visible: !window.commandMode || !window.selectedNode
+                        height: parent.height
+                        verticalAlignment: Text.AlignVCenter
+                        leftPadding: 12
+                        rightPadding: 12
+                        text: window.commandMode ? "no structure" : "Esc  structure"
+                        color: window.muted
+                        font.family: "monospace"
+                        font.pixelSize: 11
+                    }
+
+                    Label {
+                        visible: window.commandMode && window.selectedNode
+                        height: parent.height
+                        width: Math.min(implicitWidth, 170)
+                        verticalAlignment: Text.AlignVCenter
+                        leftPadding: 10
+                        rightPadding: 8
+                        text: window.selectedNode
+                              ? (window.selectedNode.kind === "heading"
+                                 ? "H" + window.selectedNode.level + "  " + window.selectedNode.text
+                                 : window.selectedNode.kind + "  " + window.selectedNode.text)
+                              : ""
+                        color: window.muted
+                        elide: Text.ElideRight
+                        font.family: "monospace"
+                        font.pixelSize: 11
+                    }
+
+                    FooterAction {
+                        visible: window.commandMode && window.selectedNode
+                        label: "move ↑"
+                        enabled: window.canMove(-1)
+                        onTriggered: window.moveRelative(-1)
+                    }
+                    FooterAction {
+                        objectName: "moveDownAction"
+                        visible: window.commandMode && window.selectedNode
+                        label: "↓"
+                        enabled: window.canMove(1)
+                        onTriggered: window.moveRelative(1)
+                    }
+
+                    Label {
+                        visible: window.commandMode && window.selectedNode &&
+                                 window.selectedNode.kind === "heading"
+                        height: parent.height
+                        verticalAlignment: Text.AlignVCenter
+                        leftPadding: 7
+                        rightPadding: 2
+                        text: "title"
+                        color: window.muted
+                        font.family: "monospace"
+                        font.pixelSize: 10
+                    }
+                    Repeater {
+                        model: window.commandMode && window.selectedNode &&
+                               window.selectedNode.kind === "heading" ? 6 : 0
+                        FooterAction {
+                            required property int index
+                            label: "H" + (index + 1)
+                            active: window.selectedNode && window.selectedNode.level === index + 1
+                            enabled: !active
+                            onTriggered: window.setSelectedHeadingLevel(index + 1)
+                        }
+                    }
+                    Label {
+                        visible: window.commandMode && window.selectedNode &&
+                                 window.selectedNode.kind === "heading"
+                        height: parent.height
+                        verticalAlignment: Text.AlignVCenter
+                        leftPadding: 7
+                        rightPadding: 1
+                        text: "branch"
+                        color: window.muted
+                        font.family: "monospace"
+                        font.pixelSize: 10
+                    }
+                    FooterAction {
+                        visible: window.commandMode && window.selectedNode &&
+                                 window.selectedNode.kind === "heading"
+                        label: "−"
+                        enabled: window.canShiftBranch(-1)
+                        onTriggered: window.applySelected("promote")
+                    }
+                    FooterAction {
+                        visible: window.commandMode && window.selectedNode &&
+                                 window.selectedNode.kind === "heading"
+                        label: "+"
+                        enabled: window.canShiftBranch(1)
+                        onTriggered: window.applySelected("demote")
+                    }
+
+                    Label {
+                        visible: window.commandMode && window.selectedNode &&
+                                 window.selectedNode.kind === "item"
+                        height: parent.height
+                        verticalAlignment: Text.AlignVCenter
+                        leftPadding: 7
+                        rightPadding: 1
+                        text: "nest"
+                        color: window.muted
+                        font.family: "monospace"
+                        font.pixelSize: 10
+                    }
+                    FooterAction {
+                        visible: window.commandMode && window.selectedNode &&
+                                 window.selectedNode.kind === "item"
+                        label: "←"
+                        onTriggered: window.applySelected("outdent")
+                    }
+                    FooterAction {
+                        visible: window.commandMode && window.selectedNode &&
+                                 window.selectedNode.kind === "item"
+                        label: "→"
+                        onTriggered: window.applySelected("indent")
+                    }
+                    FooterAction {
+                        objectName: "taskAction"
+                        visible: window.commandMode && window.selectedNode &&
+                                 window.selectedNode.kind === "item" && window.selectedNode.task
+                        label: window.selectedNode && window.selectedNode.checked ? "uncheck" : "check"
+                        onTriggered: window.applySelected("toggle_task")
+                    }
+                }
+            }
+
+            Label {
+                Layout.maximumWidth: 210
+                Layout.preferredWidth: Math.min(implicitWidth + 20, 210)
+                Layout.fillHeight: true
+                verticalAlignment: Text.AlignVCenter
+                leftPadding: 10
+                rightPadding: 10
+                text: documentController.conflict ? "CONFLICT  " + documentController.status
+                      : documentController.modified ? "saving…" : documentController.status
+                color: documentController.conflict ? "#d98b8b" : window.muted
+                elide: Text.ElideRight
+                font.family: "monospace"
+                font.pixelSize: 10
+            }
+
+            FooterAction {
+                label: documentController.tracked ? "tracked" : "track"
+                active: documentController.tracked
+                onTriggered: documentController.tracked
+                             ? documentController.repairTracking()
+                             : documentController.enableTracking()
+            }
+
+            Rectangle {
+                Layout.fillHeight: true
+                implicitWidth: 66
+                color: window.accent
+                Label {
+                    anchors.centerIn: parent
+                    text: window.cursorLine + ":" + window.cursorColumn
+                    color: window.canvasColor
+                    font.family: "monospace"
+                    font.bold: true
+                    font.pixelSize: 11
+                }
+            }
+        }
+    }
+
+    Timer {
+        id: sourceParseTimer
+        interval: 130
+        onTriggered: {
+            documentController.updateSource(sourceArea.text)
+            autosaveTimer.restart()
+        }
+    }
+
+    Timer {
+        id: autosaveTimer
+        interval: 450
+        onTriggered: {
+            if (documentController.filePath && !documentController.conflict)
+                documentController.save()
+        }
+    }
+
+    Connections {
+        target: documentController
+        function onSourceChanged() {
+            if (sourceArea.text !== documentController.source) {
+                window.syncingSource = true
+                const cursor = sourceArea.cursorPosition
+                sourceArea.text = documentController.source
+                sourceArea.cursorPosition = Math.min(cursor, sourceArea.length)
+                window.syncingSource = false
+            }
+            if (documentController.modified) autosaveTimer.restart()
+        }
+        function onDocumentChanged() { window.restoreSelection() }
+        function onThemeChanged() {
+            markdownHighlighter.setColors(window.foreground, window.muted, window.accent)
+        }
+    }
+
+    Shortcut { sequence: "Escape"; enabled: !window.commandMode; onActivated: window.enterNormal() }
+    Shortcut { sequence: "I"; enabled: window.commandMode; onActivated: window.enterInsert() }
+    Shortcut { sequence: "Return"; enabled: window.commandMode; onActivated: window.enterInsert() }
+    Shortcut { sequence: "J"; enabled: window.commandMode; onActivated: window.selectRelative(1) }
+    Shortcut { sequence: "K"; enabled: window.commandMode; onActivated: window.selectRelative(-1) }
+    Shortcut { sequence: "Shift+J"; enabled: window.commandMode; onActivated: window.moveRelative(1) }
+    Shortcut { sequence: "Shift+K"; enabled: window.commandMode; onActivated: window.moveRelative(-1) }
+    Shortcut {
+        sequence: "Shift+H"
+        enabled: window.commandMode && window.selectedNode
+        onActivated: window.applySelected(window.selectedNode.kind === "heading" ? "promote" : "outdent")
+    }
+    Shortcut {
+        sequence: "Shift+L"
+        enabled: window.commandMode && window.selectedNode
+        onActivated: window.applySelected(window.selectedNode.kind === "heading" ? "demote" : "indent")
+    }
+    Shortcut {
+        sequence: "Space"
+        enabled: window.commandMode && window.selectedNode && window.selectedNode.task
+        onActivated: window.applySelected("toggle_task")
+    }
+    Shortcut {
+        sequence: "Ctrl+N"
+        onActivated: {
+            documentController.newDocument()
+            window.enterInsert(0)
+        }
+    }
+    Shortcut { sequence: "Ctrl+O"; onActivated: openDialog.open() }
+    Shortcut { sequence: "Ctrl+S"; onActivated: window.saveNow() }
+    Shortcut { sequence: "Ctrl+Shift+S"; onActivated: { window.commitSource(); saveDialog.open() } }
+    Shortcut { sequence: "Ctrl+Q"; onActivated: window.close() }
+
+    FileDialog {
+        id: openDialog
+        title: "Open Markdown file"
+        fileMode: FileDialog.OpenFile
+        nameFilters: ["Markdown files (*.md *.markdown)", "Text files (*.txt)", "All files (*)"]
+        onAccepted: {
+            documentController.loadFile(selectedFile)
+            window.enterInsert(0)
+        }
+    }
+
+    FileDialog {
+        id: saveDialog
+        title: "Save Markdown file"
+        fileMode: FileDialog.SaveFile
+        defaultSuffix: "md"
+        nameFilters: ["Markdown files (*.md)"]
+        onAccepted: documentController.saveAs(selectedFile)
+    }
+}
