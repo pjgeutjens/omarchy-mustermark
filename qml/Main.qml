@@ -191,6 +191,8 @@ ApplicationWindow {
         if (selected.kind === "heading")
             return includeChildren ? canShiftBranch(delta)
                                    : (delta < 0 ? selected.level > 1 : selected.level < 6)
+        if (selected.kind === "item" && delta < 0 && !includeChildren && selected.hasChildren)
+            return false
         return selected.kind === "item"
     }
 

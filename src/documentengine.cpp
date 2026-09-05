@@ -663,6 +663,13 @@ EditResult DocumentEngine::apply(const QByteArray &source, const QString &baseRe
             return {false, source, QStringLiteral("invalid_scope"),
                     QStringLiteral("Scope must be self or subtree."), {}};
         const bool demoting = action == QStringLiteral("indent") || action == QStringLiteral("demote");
+        if (!demoting && scope == QStringLiteral("self") &&
+            std::any_of(node.children.cbegin(), node.children.cend(), [&](const int childIndex) {
+                return document.nodes.at(childIndex).kind == NodeKind::List;
+            })) {
+            return {false, source, QStringLiteral("unsafe_rewrite"),
+                    QStringLiteral("Promote this item with its children to keep them as a list."), {}};
+        }
         bool shifted = false;
         const QByteArray original = source.mid(node.startByte, node.endByte - node.startByte);
         QByteArray replacement;

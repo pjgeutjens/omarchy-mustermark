@@ -202,9 +202,9 @@ void DocumentEngineTest::promotesAndDemotesListItems() {
 
     EditResult changed = engine.apply(
         nested, document.revision, QStringLiteral("promote"), nestedChild.ref);
-    QVERIFY2(changed.ok, qPrintable(changed.errorMessage));
-    QCOMPARE(changed.source,
-             QByteArray("- parent\n- child\n        - grandchild\n"));
+    QVERIFY(!changed.ok);
+    QCOMPARE(changed.errorCode, QStringLiteral("unsafe_rewrite"));
+    QCOMPARE(changed.source, nested);
 
     changed = engine.apply(
         nested, document.revision, QStringLiteral("promote"), nestedChild.ref,
@@ -212,6 +212,19 @@ void DocumentEngineTest::promotesAndDemotesListItems() {
     QVERIFY2(changed.ok, qPrintable(changed.errorMessage));
     QCOMPARE(changed.source,
              QByteArray("- parent\n- child\n    - grandchild\n"));
+
+    const QByteArray nestedLeaf =
+        "- parent\n"
+        "    - child\n";
+    document = engine.parse(nestedLeaf);
+    const Node &leaf = *std::find_if(
+        document.nodes.begin(), document.nodes.end(), [](const Node &node) {
+            return node.kind == NodeKind::Item && node.text == QStringLiteral("child");
+        });
+    changed = engine.apply(
+        nestedLeaf, document.revision, QStringLiteral("promote"), leaf.ref);
+    QVERIFY2(changed.ok, qPrintable(changed.errorMessage));
+    QCOMPARE(changed.source, QByteArray("- parent\n- child\n"));
 
     const QByteArray siblings =
         "- parent\n"
