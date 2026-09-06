@@ -9,7 +9,7 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include(CTest)
-find_package(Qt6 6.6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 Test)
+find_package(Qt6 6.6 REQUIRED COMPONENTS Core Gui Network Qml Quick QuickControls2 Test)
 
 set(CMARK_GFM_ROOT "$ENV{CMARK_GFM_ROOT}" CACHE PATH "Prefix containing cmark-gfm")
 find_path(CMARK_GFM_INCLUDE_DIR cmark-gfm.h
@@ -24,6 +24,8 @@ if(NOT CMARK_GFM_INCLUDE_DIR OR NOT CMARK_GFM_LIBRARY OR NOT CMARK_GFM_EXTENSION
 endif()
 
 add_library(mustermark_core STATIC
+    src/documentsession.cpp
+    src/documentsession.h
     src/documentengine.cpp
     src/documentengine.h
     src/filedocument.cpp
@@ -43,10 +45,12 @@ qt_add_executable(mustermark
     src/markdownhighlighter.h
     src/cli.cpp
     src/cli.h
+    src/httpserver.cpp
+    src/httpserver.h
     resources.qrc
 )
 target_link_libraries(mustermark PRIVATE
-    mustermark_core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2)
+    mustermark_core Qt6::Gui Qt6::Network Qt6::Qml Qt6::Quick Qt6::QuickControls2)
 
 install(TARGETS mustermark RUNTIME DESTINATION bin)
 install(FILES packaging/mustermark.desktop DESTINATION share/applications)
@@ -71,4 +75,18 @@ if(BUILD_TESTING)
     add_test(NAME mustermark_qml_tests COMMAND mustermark_qml_tests)
     set_tests_properties(mustermark_qml_tests PROPERTIES ENVIRONMENT
         "QT_QPA_PLATFORM=offscreen;QT_QPA_PLATFORMTHEME=generic;QT_QUICK_BACKEND=software;QT_STYLE_OVERRIDE=Basic;XDG_DATA_HOME=/tmp/mustermark-test-data")
+
+    find_program(CURL_EXECUTABLE curl)
+    find_program(JQ_EXECUTABLE jq)
+    if(CURL_EXECUTABLE AND JQ_EXECUTABLE)
+        add_test(NAME mustermark_http_tests
+            COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_http_serving.sh
+                    $<TARGET_FILE:mustermark> ${CMAKE_SOURCE_DIR})
+        add_test(NAME mustermark_stdio_tests
+            COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_stdio_api.sh
+                    $<TARGET_FILE:mustermark> ${CMAKE_SOURCE_DIR})
+        add_test(NAME mustermark_shared_gui_tests
+            COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_shared_gui_server.sh
+                    $<TARGET_FILE:mustermark> ${CMAKE_SOURCE_DIR})
+    endif()
 endif()

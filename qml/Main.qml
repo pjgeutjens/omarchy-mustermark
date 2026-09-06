@@ -26,6 +26,7 @@ ApplicationWindow {
     readonly property color accent: documentController.theme.accent
     readonly property color muted: documentController.theme.muted
     readonly property color selection: documentController.theme.selection
+    readonly property color selectionForeground: documentController.theme.selectionForeground
     readonly property var selectedNode: selectedIndex >= 0 && selectedIndex < documentController.nodes.length
                                         ? documentController.nodes[selectedIndex] : null
     readonly property int cursorLine: lineForPosition(sourceArea.cursorPosition)
@@ -192,8 +193,6 @@ ApplicationWindow {
         if (selected.kind === "heading")
             return includeChildren ? canShiftBranch(delta)
                                    : (delta < 0 ? selected.level > 1 : selected.level < 6)
-        if (selected.kind === "item" && delta < 0 && !includeChildren && selected.hasChildren)
-            return false
         return selected.kind === "item"
     }
 
@@ -222,7 +221,8 @@ ApplicationWindow {
         const selected = currentNode()
         if (!selected || (selected.kind !== "heading" && selected.kind !== "item")) return
         rememberSelection(selected.startLine)
-        documentController.shiftLevel(action, selected.identity, includeChildren)
+        documentController.shiftLevel(action, selected.identity,
+                                      selected.kind === "item" || includeChildren)
     }
 
     function setSelectedHeadingLevel(level) {
@@ -363,8 +363,8 @@ ApplicationWindow {
             topPadding: 30
             bottomPadding: 60
             color: window.foreground
-            selectionColor: window.accent
-            selectedTextColor: window.canvasColor
+            selectionColor: window.selection
+            selectedTextColor: window.selectionForeground
             font.family: "monospace"
             font.pixelSize: 17
             wrapMode: TextEdit.Wrap
@@ -652,9 +652,10 @@ ApplicationWindow {
                 implicitWidth: 76
                 color: window.commandMode ? window.accent : window.selection
                 Label {
+                    objectName: "modeLabel"
                     anchors.centerIn: parent
                     text: window.commandMode ? "NORMAL" : "INSERT"
-                    color: window.commandMode ? window.canvasColor : window.foreground
+                    color: window.commandMode ? window.canvasColor : window.selectionForeground
                     font.family: "monospace"
                     font.bold: true
                     font.pixelSize: 11
@@ -766,8 +767,7 @@ ApplicationWindow {
                     }
                     FooterAction {
                         visible: window.commandMode && window.selectedNode &&
-                                 (window.selectedNode.kind === "heading" ||
-                                  window.selectedNode.kind === "item")
+                                 window.selectedNode.kind === "heading"
                         label: "+children"
                         active: window.includeDescendants
                         onTriggered: window.includeDescendants = !window.includeDescendants
@@ -817,7 +817,7 @@ ApplicationWindow {
                 label: documentController.tracked ? "tracked" : "track"
                 active: documentController.tracked
                 onTriggered: documentController.tracked
-                             ? documentController.repairTracking()
+                             ? documentController.disableTracking()
                              : documentController.enableTracking()
             }
 
@@ -911,12 +911,14 @@ ApplicationWindow {
     }
     Shortcut {
         sequence: "Ctrl+Shift+H"
-        enabled: window.commandMode && !window.recentVisible && window.canShiftLevel(-1, true)
+        enabled: window.commandMode && !window.recentVisible && window.selectedNode &&
+                 window.selectedNode.kind === "heading" && window.canShiftLevel(-1, true)
         onActivated: window.shiftSelected("promote", true)
     }
     Shortcut {
         sequence: "Ctrl+Shift+L"
-        enabled: window.commandMode && !window.recentVisible && window.canShiftLevel(1, true)
+        enabled: window.commandMode && !window.recentVisible && window.selectedNode &&
+                 window.selectedNode.kind === "heading" && window.canShiftLevel(1, true)
         onActivated: window.shiftSelected("demote", true)
     }
     Shortcut {

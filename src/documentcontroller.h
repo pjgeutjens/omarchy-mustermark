@@ -1,6 +1,6 @@
 #pragma once
 
-#include "documentengine.h"
+#include "documentsession.h"
 
 #include <QFileSystemWatcher>
 #include <QObject>
@@ -30,13 +30,13 @@ public:
     QString renderedHtml() const;
     QString filePath() const { return m_filePath; }
     QString title() const;
-    QString revision() const { return m_document.revision; }
+    QString revision() const { return m_session.document().revision; }
     QVariantList nodes() const;
     QVariantList recentFiles() const;
     QVariantMap theme() const { return m_theme; }
     QString status() const { return m_status; }
     bool modified() const { return m_modified; }
-    bool tracked() const { return m_document.tracked; }
+    bool tracked() const { return m_session.tracking(); }
     bool conflict() const { return m_conflict; }
 
     Q_INVOKABLE void newDocument();
@@ -54,6 +54,9 @@ public:
                                 bool includeDescendants);
     Q_INVOKABLE bool setHeadingLevel(const QString &node, int level);
     Q_INVOKABLE void checkExternalChange();
+
+    QJsonObject apiState() const;
+    QJsonObject applyApiInstruction(const QJsonObject &instruction);
 
 signals:
     void sourceChanged();
@@ -77,9 +80,9 @@ private:
     void writeRecovery() const;
     void clearRecovery() const;
     QString recoveryPath() const;
+    void notifySessionChanged(bool didChangeSource);
 
-    Mustermark::DocumentEngine m_engine;
-    Mustermark::Document m_document;
+    Mustermark::DocumentSession m_session;
     QString m_filePath;
     QString m_diskRevision;
     QString m_status;

@@ -17,6 +17,14 @@
 namespace Mustermark {
 namespace {
 
+QString externalIdentity(const Node &node) {
+    if (!node.sessionId.isEmpty())
+        return node.sessionId;
+    if (!node.id.isEmpty())
+        return node.id;
+    return node.ref;
+}
+
 struct Lines {
     QByteArray source;
     QVector<qsizetype> starts;
@@ -134,6 +142,60 @@ QString lineIndent(const QByteArray &line) {
     return QString::fromUtf8(line.left(count));
 }
 
+QString enrichedHtml(QString html, const QVector<Node> &nodes) {
+    html.replace(QRegularExpression(QStringLiteral(R"(\s*<!-- raw HTML omitted -->\s*)")),
+                 QStringLiteral("\n"));
+    html.remove(QRegularExpression(QStringLiteral(R"(\sdata-mm-(?:kind|ref|id|fingerprint|level|depth|labels|task|checked)="[^"]*")")));
+    const QRegularExpression openingTag(
+        QStringLiteral(R"(<(h[1-6]|ul|ol|li)\b([^>]*\bdata-sourcepos="(\d+):\d+-(\d+):\d+"[^>]*)>)"));
+    QRegularExpressionMatchIterator matches = openingTag.globalMatch(html);
+    struct Injection { qsizetype position; QString attributes; };
+    QVector<Injection> injections;
+    while (matches.hasNext()) {
+        const QRegularExpressionMatch match = matches.next();
+        const QString tag = match.captured(1);
+        const int startLine = match.captured(3).toInt();
+        const NodeKind wantedKind = tag == QStringLiteral("li")
+                                      ? NodeKind::Item
+                                      : (tag == QStringLiteral("ul") || tag == QStringLiteral("ol"))
+                                            ? NodeKind::List : NodeKind::Heading;
+        const auto node = std::find_if(nodes.cbegin(), nodes.cend(), [&](const Node &candidate) {
+            return candidate.kind == wantedKind && candidate.startLine == startLine;
+        });
+        if (node == nodes.cend())
+            continue;
+        QString attributes = QStringLiteral(" data-mm-kind=\"") +
+                             DocumentEngine::kindName(node->kind).toHtmlEscaped() +
+                             QStringLiteral("\" data-mm-ref=\"") + externalIdentity(*node).toHtmlEscaped() +
+                             QStringLiteral("\"");
+        const QString identity = !node->sessionId.isEmpty() ? node->sessionId : node->id;
+        if (!identity.isEmpty())
+            attributes += QStringLiteral(" data-mm-id=\"") + identity.toHtmlEscaped() +
+                          QStringLiteral("\"");
+        if (!node->fingerprint.isEmpty())
+            attributes += QStringLiteral(" data-mm-fingerprint=\"") +
+                          node->fingerprint.toHtmlEscaped() + QStringLiteral("\"");
+        if (node->kind == NodeKind::Heading)
+            attributes += QStringLiteral(" data-mm-level=\"") + QString::number(node->level) +
+                          QStringLiteral("\"");
+        if (node->kind == NodeKind::Item)
+            attributes += QStringLiteral(" data-mm-depth=\"") + QString::number(node->depth) +
+                          QStringLiteral("\"");
+        if (!node->labels.isEmpty())
+            attributes += QStringLiteral(" data-mm-labels=\"") +
+                          node->labels.join(QLatin1Char(',')).toHtmlEscaped() +
+                          QStringLiteral("\"");
+        if (node->kind == NodeKind::Item && node->task)
+            attributes += QStringLiteral(" data-mm-task=\"true\" data-mm-checked=\"") +
+                          (node->checked ? QStringLiteral("true") : QStringLiteral("false")) +
+                          QStringLiteral("\"");
+        injections.append({match.capturedEnd(2), attributes});
+    }
+    for (auto injection = injections.crbegin(); injection != injections.crend(); ++injection)
+        html.insert(injection->position, injection->attributes);
+    return html;
+}
+
 QByteArray shiftIndent(const QByteArray &block, int delta, bool *ok) {
     *ok = true;
     const bool hasFinalNewline = block.endsWith('\n');
@@ -202,9 +264,14 @@ QString DocumentEngine::kindName(NodeKind kind) {
     return QStringLiteral("block");
 }
 
+QString DocumentEngine::enrichHtml(QString html, const QVector<Node> &nodes) {
+    return enrichedHtml(std::move(html), nodes);
+}
+
 int Document::findNode(const QString &identity) const {
     for (int index = 0; index < nodes.size(); ++index) {
-        if (nodes.at(index).id == identity || nodes.at(index).ref == identity)
+        if (nodes.at(index).sessionId == identity || nodes.at(index).id == identity ||
+            nodes.at(index).ref == identity)
             return index;
     }
     return -1;
@@ -217,10 +284,10 @@ QJsonObject Document::toJson() const {
         QJsonArray childArray;
         for (int child : node.children) {
             const Node &childNode = nodes.at(child);
-            childArray.append(childNode.id.isEmpty() ? childNode.ref : childNode.id);
+            childArray.append(externalIdentity(childNode));
         }
         QJsonObject value{
-            {QStringLiteral("ref"), node.ref},
+            {QStringLiteral("ref"), externalIdentity(node)},
             {QStringLiteral("kind"), DocumentEngine::kindName(node.kind)},
             {QStringLiteral("text"), node.text},
             {QStringLiteral("level"), node.level},
@@ -234,11 +301,15 @@ QJsonObject Document::toJson() const {
             {QStringLiteral("checked"), node.checked},
             {QStringLiteral("ordered"), node.ordered},
         };
-        if (!node.id.isEmpty())
+        if (!node.sessionId.isEmpty())
+            value.insert(QStringLiteral("id"), node.sessionId);
+        else if (!node.id.isEmpty())
             value.insert(QStringLiteral("id"), node.id);
+        if (!node.fingerprint.isEmpty())
+            value.insert(QStringLiteral("fingerprint"), node.fingerprint);
         if (node.parent >= 0) {
             const Node &parentNode = nodes.at(node.parent);
-            value.insert(QStringLiteral("parent"), parentNode.id.isEmpty() ? parentNode.ref : parentNode.id);
+            value.insert(QStringLiteral("parent"), externalIdentity(parentNode));
         }
         QJsonArray labels;
         for (const QString &label : node.labels)
@@ -284,12 +355,6 @@ Document DocumentEngine::parse(const QByteArray &source) const {
     }
     cmark_parser_feed(parser, source.constData(), static_cast<size_t>(source.size()));
     cmark_node *root = cmark_parser_finish(parser);
-
-    if (char *html = cmark_render_html(root, CMARK_OPT_UNSAFE,
-                                       cmark_parser_get_syntax_extensions(parser))) {
-        result.renderedHtml = QString::fromUtf8(html);
-        std::free(html);
-    }
 
     QHash<quintptr, int> indices;
     QVector<int> headingStack;
@@ -429,6 +494,12 @@ Document DocumentEngine::parse(const QByteArray &source) const {
         }
         heading.endLine = std::max(heading.startLine, subtreeEnd);
         heading.endByte = lines.end(heading.endLine);
+    }
+
+    if (char *html = cmark_render_html(root, CMARK_OPT_SOURCEPOS,
+                                       cmark_parser_get_syntax_extensions(parser))) {
+        result.renderedHtml = enrichHtml(QString::fromUtf8(html), result.nodes);
+        std::free(html);
     }
 
     cmark_node_free(root);
@@ -577,19 +648,27 @@ EditResult DocumentEngine::apply(const QByteArray &source, const QString &baseRe
     const Lines lines(source);
     QJsonArray edits;
 
-    if (action == QStringLiteral("toggle_task")) {
+    if (action == QStringLiteral("toggle_task") || action == QStringLiteral("task_set")) {
         if (node.kind != NodeKind::Item || !node.task)
             return {false, source, QStringLiteral("invalid_action"),
-                    QStringLiteral("Only task-list items can be toggled."), {}};
+                    QStringLiteral("Only task-list items can change task state."), {}};
+        if (action == QStringLiteral("task_set") &&
+            (!arguments.contains(QStringLiteral("checked")) ||
+             !arguments.value(QStringLiteral("checked")).isBool()))
+            return {false, source, QStringLiteral("invalid_checked"),
+                    QStringLiteral("task_set requires a Boolean checked value."), {}};
         QByteArray line = lines.bytes(node.startLine);
         const auto match = itemPattern.match(QString::fromUtf8(line));
         if (!match.hasMatch() || match.capturedStart(4) < 0)
             return {false, source, QStringLiteral("unsafe_rewrite"),
                     QStringLiteral("The task marker could not be located safely."), {}};
         const qsizetype offset = lines.start(node.startLine) + match.capturedStart(4);
+        const bool checked = action == QStringLiteral("task_set")
+                                 ? arguments.value(QStringLiteral("checked")).toBool()
+                                 : !node.checked;
         edits.append(QJsonObject{{QStringLiteral("startByte"), static_cast<double>(offset)},
                       {QStringLiteral("endByte"), static_cast<double>(offset + 1)},
-                      {QStringLiteral("text"), node.checked ? QStringLiteral(" ") : QStringLiteral("x")}});
+                      {QStringLiteral("text"), checked ? QStringLiteral("x") : QStringLiteral(" ")}});
     } else if (action == QStringLiteral("label_add") || action == QStringLiteral("label_remove")) {
         if (node.id.isEmpty() || node.metadataLine < 1)
             return {false, source, QStringLiteral("tracking_required"),
@@ -654,67 +733,15 @@ EditResult DocumentEngine::apply(const QByteArray &source, const QString &baseRe
         if (node.kind != NodeKind::Item)
             return {false, source, QStringLiteral("invalid_action"),
                     QStringLiteral("Only list items can be indented or outdented."), {}};
-        const bool legacyIndentAction = action == QStringLiteral("indent") ||
-                                        action == QStringLiteral("outdent");
-        const QString defaultScope = legacyIndentAction ? QStringLiteral("subtree")
-                                                        : QStringLiteral("self");
-        const QString scope = arguments.value(QStringLiteral("scope")).toString(defaultScope);
-        if (scope != QStringLiteral("self") && scope != QStringLiteral("subtree"))
+        const QString scope = arguments.value(QStringLiteral("scope"))
+                                  .toString(QStringLiteral("subtree"));
+        if (scope != QStringLiteral("subtree"))
             return {false, source, QStringLiteral("invalid_scope"),
-                    QStringLiteral("Scope must be self or subtree."), {}};
+                    QStringLiteral("List items always move together with their child items."), {}};
         const bool demoting = action == QStringLiteral("indent") || action == QStringLiteral("demote");
-        if (!demoting && scope == QStringLiteral("self") &&
-            std::any_of(node.children.cbegin(), node.children.cend(), [&](const int childIndex) {
-                return document.nodes.at(childIndex).kind == NodeKind::List;
-            })) {
-            return {false, source, QStringLiteral("unsafe_rewrite"),
-                    QStringLiteral("Promote this item with its children to keep them as a list."), {}};
-        }
         bool shifted = false;
         const QByteArray original = source.mid(node.startByte, node.endByte - node.startByte);
-        QByteArray replacement;
-        if (scope == QStringLiteral("subtree")) {
-            replacement = shiftIndent(original, demoting ? 4 : -4, &shifted);
-        } else {
-            const bool hasFinalNewline = original.endsWith('\n');
-            QList<QByteArray> itemLines = original.split('\n');
-            if (hasFinalNewline && !itemLines.isEmpty())
-                itemLines.removeLast();
-            shifted = true;
-            for (int lineIndex = 0; lineIndex < itemLines.size(); ++lineIndex) {
-                const int sourceLine = node.startLine + lineIndex;
-                bool belongsToChildList = false;
-                for (const int childIndex : node.children) {
-                    const Node &child = document.nodes.at(childIndex);
-                    if (child.kind != NodeKind::List)
-                        continue;
-                    const int firstChildLine = child.metadataLine > 0 ? child.metadataLine : child.startLine;
-                    if (sourceLine >= firstChildLine && sourceLine <= child.endLine) {
-                        belongsToChildList = true;
-                        break;
-                    }
-                }
-                if (belongsToChildList || itemLines[lineIndex].trimmed().isEmpty())
-                    continue;
-                if (demoting) {
-                    itemLines[lineIndex].prepend("    ");
-                } else {
-                    int remaining = 4;
-                    while (remaining > 0 && !itemLines[lineIndex].isEmpty() &&
-                           itemLines[lineIndex].at(0) == ' ') {
-                        itemLines[lineIndex].remove(0, 1);
-                        --remaining;
-                    }
-                    if (remaining != 0) {
-                        shifted = false;
-                        break;
-                    }
-                }
-            }
-            replacement = shifted ? itemLines.join('\n') : original;
-            if (shifted && hasFinalNewline)
-                replacement += '\n';
-        }
+        const QByteArray replacement = shiftIndent(original, demoting ? 4 : -4, &shifted);
         if (!shifted)
             return {false, source, QStringLiteral("unsafe_rewrite"),
                     demoting
@@ -723,6 +750,20 @@ EditResult DocumentEngine::apply(const QByteArray &source, const QString &baseRe
         edits.append(QJsonObject{{QStringLiteral("startByte"), static_cast<double>(node.startByte)},
                       {QStringLiteral("endByte"), static_cast<double>(node.endByte)},
                       {QStringLiteral("text"), QString::fromUtf8(replacement)}});
+        if (!demoting && node.parent >= 0) {
+            const Node &parentList = document.nodes.at(node.parent);
+            const int itemCount = std::count_if(
+                parentList.children.cbegin(), parentList.children.cend(), [&](const int childIndex) {
+                    return document.nodes.at(childIndex).kind == NodeKind::Item;
+                });
+            if (itemCount == 1 && parentList.metadataLine > 0) {
+                edits.append(QJsonObject{
+                    {QStringLiteral("startByte"), static_cast<double>(parentList.metadataStart)},
+                    {QStringLiteral("endByte"), static_cast<double>(parentList.metadataEnd)},
+                    {QStringLiteral("text"), QString()},
+                });
+            }
+        }
     } else if (action == QStringLiteral("promote") || action == QStringLiteral("demote")) {
         if (node.kind != NodeKind::Heading)
             return {false, source, QStringLiteral("invalid_action"),
@@ -822,6 +863,14 @@ EditResult DocumentEngine::apply(const QByteArray &source, const QString &baseRe
     EditResult result = applyEdits(source, edits);
     if (!result.ok)
         return result;
+    if (document.tracked) {
+        const EditResult completedTracking = track(result.source);
+        if (!completedTracking.ok)
+            return completedTracking;
+        result.source = completedTracking.source;
+        for (const QJsonValue &edit : completedTracking.edits)
+            result.edits.append(edit);
+    }
     const Document reparsed = parse(result.source);
     if (!node.id.isEmpty() && action != QStringLiteral("delete") &&
         reparsed.findNode(node.id) < 0)

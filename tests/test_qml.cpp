@@ -38,6 +38,10 @@ void QmlUiTest::continuesListWhileTyping() {
     QVERIFY(window);
     auto *source = root->findChild<QQuickItem *>(QStringLiteral("sourceArea"));
     QVERIFY(source);
+    auto *modeLabel = root->findChild<QQuickItem *>(QStringLiteral("modeLabel"));
+    QVERIFY(modeLabel);
+    QCOMPARE(modeLabel->property("color").value<QColor>(),
+             controller.theme().value(QStringLiteral("selectionForeground")).value<QColor>());
     source->forceActiveFocus();
     QTest::qWait(20);
 
@@ -75,6 +79,8 @@ void QmlUiTest::typesSelectsAndReorganises() {
     QVERIFY(window);
     auto *source = root->findChild<QQuickItem *>(QStringLiteral("sourceArea"));
     QVERIFY(source);
+    auto *modeLabel = root->findChild<QQuickItem *>(QStringLiteral("modeLabel"));
+    QVERIFY(modeLabel);
 
     QTest::qWait(50);
     QVERIFY(!root->property("commandMode").toBool());
@@ -89,6 +95,8 @@ void QmlUiTest::typesSelectsAndReorganises() {
 
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_VERIFY(root->property("commandMode").toBool());
+    QCOMPARE(modeLabel->property("color").value<QColor>(),
+             controller.theme().value(QStringLiteral("background")).value<QColor>());
     QVERIFY2(root->property("selectedIndex").toInt() >= 0,
              qPrintable(QStringLiteral("cursor=%1 nodes=%2")
                             .arg(source->property("cursorPosition").toInt())

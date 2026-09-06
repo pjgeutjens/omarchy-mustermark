@@ -1,0 +1,16 @@
+:root {
+  --accent: #cfafbd;
+}
+
+.mm-label {
+  background: rgba(159, 197, 165, 0.08);
+  border-color: #9fc5a5;
+  border-style: dashed;
+  color: #9fc5a5;
+}
+
+[data-mm-task="true"][data-mm-checked="true"] > .mm-task-text,
+[data-mm-task="true"][data-mm-checked="true"] > p {
+  color: #d96b6b;
+  text-decoration: none;
+}

@@ -34,11 +34,11 @@ DocumentController::DocumentController(QObject *parent) : QObject(parent) {
 }
 
 QString DocumentController::source() const {
-    return QString::fromUtf8(m_document.source);
+    return QString::fromUtf8(m_session.document().source);
 }
 
 QString DocumentController::renderedHtml() const {
-    return m_document.renderedHtml;
+    return m_session.document().renderedHtml;
 }
 
 QString DocumentController::title() const {
@@ -48,14 +48,19 @@ QString DocumentController::title() const {
 
 QVariantList DocumentController::nodes() const {
     QVariantList values;
-    for (int index = 0; index < m_document.nodes.size(); ++index) {
-        const Node &node = m_document.nodes.at(index);
+    const Document &document = m_session.document();
+    for (int index = 0; index < document.nodes.size(); ++index) {
+        const Node &node = document.nodes.at(index);
         if (node.kind == NodeKind::List)
             continue;
         QVariantMap value;
-        value.insert(QStringLiteral("identity"), node.id.isEmpty() ? node.ref : node.id);
-        value.insert(QStringLiteral("id"), node.id);
-        value.insert(QStringLiteral("ref"), node.ref);
+        const QString identity = !node.sessionId.isEmpty()
+                                     ? node.sessionId
+                                     : (node.id.isEmpty() ? node.ref : node.id);
+        value.insert(QStringLiteral("identity"), identity);
+        value.insert(QStringLiteral("id"), node.sessionId);
+        value.insert(QStringLiteral("ref"), identity);
+        value.insert(QStringLiteral("fingerprint"), node.fingerprint);
         value.insert(QStringLiteral("kind"), DocumentEngine::kindName(node.kind));
         value.insert(QStringLiteral("text"), node.text);
         value.insert(QStringLiteral("labels"), node.labels);
@@ -68,8 +73,10 @@ QVariantList DocumentController::nodes() const {
         value.insert(QStringLiteral("ordered"), node.ordered);
         value.insert(QStringLiteral("hasChildren"), !node.children.isEmpty());
         if (node.parent >= 0) {
-            const Node &parent = m_document.nodes.at(node.parent);
-            value.insert(QStringLiteral("parent"), parent.id.isEmpty() ? parent.ref : parent.id);
+            const Node &parent = document.nodes.at(node.parent);
+            value.insert(QStringLiteral("parent"), !parent.sessionId.isEmpty()
+                                                       ? parent.sessionId
+                                                       : (parent.id.isEmpty() ? parent.ref : parent.id));
         } else {
             value.insert(QStringLiteral("parent"), QString());
         }
@@ -132,7 +139,8 @@ bool DocumentController::save() {
         setStatus(QStringLiteral("Autosave is paused because the file changed on disk"));
         return false;
     }
-    const FileResult result = FileDocument::writeAtomic(m_filePath, m_document.source, m_diskRevision);
+    const Document &document = m_session.document();
+    const FileResult result = FileDocument::writeAtomic(m_filePath, document.source, m_diskRevision);
     if (!result.ok) {
         if (result.error == QStringLiteral("stale_revision"))
             setConflict(true);
@@ -140,7 +148,7 @@ bool DocumentController::save() {
         writeRecovery();
         return false;
     }
-    m_diskRevision = m_document.revision;
+    m_diskRevision = document.revision;
     if (m_modified) {
         m_modified = false;
         emit modifiedChanged();
@@ -153,7 +161,8 @@ bool DocumentController::save() {
 
 bool DocumentController::saveAs(const QUrl &url) {
     const QString path = url.isLocalFile() ? url.toLocalFile() : url.toString();
-    const FileResult result = FileDocument::writeAtomic(path, m_document.source);
+    const Document &document = m_session.document();
+    const FileResult result = FileDocument::writeAtomic(path, document.source);
     if (!result.ok) {
         setStatus(result.error);
         return false;
@@ -161,7 +170,7 @@ bool DocumentController::saveAs(const QUrl &url) {
     if (!m_filePath.isEmpty())
         m_watcher.removePath(m_filePath);
     m_filePath = path;
-    m_diskRevision = m_document.revision;
+    m_diskRevision = document.revision;
     m_modified = false;
     setConflict(false);
     clearRecovery();
@@ -175,42 +184,35 @@ bool DocumentController::saveAs(const QUrl &url) {
 
 void DocumentController::updateSource(const QString &sourceText) {
     const QByteArray bytes = sourceText.toUtf8();
-    if (bytes == m_document.source)
+    if (bytes == m_session.document().source)
         return;
     setSource(bytes, true);
     writeRecovery();
 }
 
 bool DocumentController::enableTracking() {
-    const EditResult result = m_engine.track(m_document.source);
+    const EditResult result = m_session.startTracking();
     if (!result.ok) {
         setStatus(result.errorMessage);
         return false;
     }
-    setSource(result.source, true);
-    setStatus(QStringLiteral("Tracking enabled"));
+    emit documentChanged();
+    setStatus(QStringLiteral("Session tracking started"));
     return true;
 }
 
 bool DocumentController::repairTracking() {
-    const EditResult result = m_engine.repair(m_document.source);
-    if (!result.ok) {
-        setStatus(result.errorMessage);
-        return false;
-    }
-    setSource(result.source, true);
-    setStatus(QStringLiteral("Tracking metadata repaired"));
-    return true;
+    return disableTracking();
 }
 
 bool DocumentController::disableTracking() {
-    const EditResult result = m_engine.untrack(m_document.source);
+    const EditResult result = m_session.stopTracking();
     if (!result.ok) {
         setStatus(result.errorMessage);
         return false;
     }
-    setSource(result.source, true);
-    setStatus(QStringLiteral("Tracking metadata removed"));
+    emit documentChanged();
+    setStatus(QStringLiteral("Session tracking stopped"));
     return true;
 }
 
@@ -221,43 +223,47 @@ bool DocumentController::applyAction(const QString &action, const QString &node,
     if (!target.isEmpty()) arguments.insert(QStringLiteral("target"), target);
     if (!label.isEmpty()) arguments.insert(QStringLiteral("label"), label);
     if (!text.isNull()) arguments.insert(QStringLiteral("text"), text);
-    const EditResult result = m_engine.apply(m_document.source, m_document.revision,
-                                             action, node, arguments);
+    const QByteArray previous = m_session.document().source;
+    const EditResult result = m_session.apply(m_session.document().revision, action, node, arguments);
     if (!result.ok) {
         setStatus(result.errorMessage);
         return false;
     }
-    setSource(result.source, true);
+    notifySessionChanged(previous != m_session.document().source);
     setStatus(QStringLiteral("%1 applied").arg(action));
     return true;
 }
 
 bool DocumentController::shiftLevel(const QString &action, const QString &node,
                                     bool includeDescendants) {
-    const EditResult result = m_engine.apply(
-        m_document.source, m_document.revision, action, node,
-        {{QStringLiteral("scope"), includeDescendants ? QStringLiteral("subtree")
-                                                       : QStringLiteral("self")}});
+    const Document &document = m_session.document();
+    const int nodeIndex = document.findNode(node);
+    const bool item = nodeIndex >= 0 && document.nodes.at(nodeIndex).kind == NodeKind::Item;
+    const bool effectiveDescendants = item || includeDescendants;
+    const EditResult result = m_session.apply(
+        document.revision, action, node,
+        {{QStringLiteral("scope"), effectiveDescendants ? QStringLiteral("subtree")
+                                                         : QStringLiteral("self")}});
     if (!result.ok) {
         setStatus(result.errorMessage);
         return false;
     }
-    setSource(result.source, true);
+    notifySessionChanged(true);
     setStatus(QStringLiteral("%1 applied to %2")
-                  .arg(action, includeDescendants ? QStringLiteral("subtree")
-                                                  : QStringLiteral("selection")));
+                  .arg(action, effectiveDescendants ? QStringLiteral("subtree")
+                                                    : QStringLiteral("selection")));
     return true;
 }
 
 bool DocumentController::setHeadingLevel(const QString &node, int level) {
-    const EditResult result = m_engine.apply(
-        m_document.source, m_document.revision, QStringLiteral("set_heading_level"),
+    const EditResult result = m_session.apply(
+        m_session.document().revision, QStringLiteral("set_heading_level"),
         node, {{QStringLiteral("level"), level}});
     if (!result.ok) {
         setStatus(result.errorMessage);
         return false;
     }
-    setSource(result.source, true);
+    notifySessionChanged(true);
     setStatus(QStringLiteral("Heading changed to H%1").arg(level));
     return true;
 }
@@ -283,13 +289,96 @@ void DocumentController::checkExternalChange() {
 }
 
 void DocumentController::setSource(const QByteArray &bytes, bool isModified) {
-    m_document = m_engine.parse(bytes);
+    m_session.setSource(bytes);
     emit sourceChanged();
     emit documentChanged();
     if (m_modified != isModified) {
         m_modified = isModified;
         emit modifiedChanged();
     }
+}
+
+void DocumentController::notifySessionChanged(bool didChangeSource) {
+    emit sourceChanged();
+    emit documentChanged();
+    if (didChangeSource && !m_modified) {
+        m_modified = true;
+        emit modifiedChanged();
+    }
+    if (didChangeSource)
+        writeRecovery();
+}
+
+QJsonObject DocumentController::apiState() const {
+    QJsonObject result = m_session.document().toJson();
+    result.insert(QStringLiteral("ok"), true);
+    result.insert(QStringLiteral("path"), m_filePath);
+    result.insert(QStringLiteral("source"), source());
+    result.insert(QStringLiteral("html"), m_session.document().renderedHtml);
+    return result;
+}
+
+QJsonObject DocumentController::applyApiInstruction(const QJsonObject &instruction) {
+    auto failure = [](const QString &code, const QString &message) {
+        return QJsonObject{
+            {QStringLiteral("ok"), false},
+            {QStringLiteral("error"), QJsonObject{
+                {QStringLiteral("code"), code},
+                {QStringLiteral("message"), message},
+            }},
+        };
+    };
+
+    const QString expected = instruction.value(QStringLiteral("baseRevision")).toString();
+    if (expected.isEmpty())
+        return failure(QStringLiteral("base_revision_required"),
+                       QStringLiteral("baseRevision is required."));
+    if (expected != m_session.document().revision)
+        return failure(QStringLiteral("stale_revision"),
+                       QStringLiteral("The document changed after this instruction was prepared."));
+
+    const QByteArray previousSource = m_session.document().source;
+    const QString action = instruction.value(QStringLiteral("action")).toString();
+    EditResult edit;
+    if (action == QStringLiteral("track") || action == QStringLiteral("tracking_start"))
+        edit = m_session.startTracking();
+    else if (action == QStringLiteral("untrack") || action == QStringLiteral("tracking_stop"))
+        edit = m_session.stopTracking();
+    else
+        edit = m_session.apply(expected, action,
+                               instruction.value(QStringLiteral("node")).toString(), instruction);
+    if (!edit.ok)
+        return failure(edit.errorCode, edit.errorMessage);
+
+    const bool didChangeSource = previousSource != m_session.document().source;
+    if (didChangeSource) {
+        if (m_filePath.isEmpty()) {
+            m_session.setSource(previousSource);
+            return failure(QStringLiteral("unsaved_document"),
+                           QStringLiteral("Save the document before changing it through HTTP."));
+        }
+        const FileResult written = FileDocument::writeAtomic(
+            m_filePath, m_session.document().source, m_diskRevision);
+        if (!written.ok) {
+            m_session.setSource(previousSource);
+            return failure(written.error == QStringLiteral("stale_revision")
+                               ? QStringLiteral("stale_revision")
+                               : QStringLiteral("write_failed"), written.error);
+        }
+        m_diskRevision = m_session.document().revision;
+        if (m_modified) {
+            m_modified = false;
+            emit modifiedChanged();
+        }
+        clearRecovery();
+        watchCurrentFile();
+    }
+    emit sourceChanged();
+    emit documentChanged();
+
+    QJsonObject result = apiState();
+    result.insert(QStringLiteral("edits"), edit.edits);
+    return result;
 }
 
 void DocumentController::setStatus(const QString &value) {
@@ -319,6 +408,7 @@ void DocumentController::loadTheme() {
         {QStringLiteral("accent"), QStringLiteral("#b59caa")},
         {QStringLiteral("muted"), QStringLiteral("#766f70")},
         {QStringLiteral("selection"), QStringLiteral("#3a3034")},
+        {QStringLiteral("selectionForeground"), QStringLiteral("#ded6cc")},
     };
     QFile file(m_themePath);
     if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -337,6 +427,8 @@ void DocumentController::loadTheme() {
                 values.insert(QStringLiteral("muted"), color);
             else if (name == QStringLiteral("selection_background"))
                 values.insert(QStringLiteral("selection"), color);
+            else if (name == QStringLiteral("selection_foreground"))
+                values.insert(QStringLiteral("selectionForeground"), color);
         }
     }
     m_theme = values;
@@ -392,7 +484,7 @@ void DocumentController::writeRecovery() const {
     QDir().mkpath(QFileInfo(path).absolutePath());
     QSaveFile file(path);
     if (file.open(QIODevice::WriteOnly)) {
-        file.write(m_document.source);
+        file.write(m_session.document().source);
         file.commit();
     }
 }

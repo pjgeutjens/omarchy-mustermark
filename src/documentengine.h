@@ -20,6 +20,8 @@ struct Node {
     NodeKind kind = NodeKind::Block;
     QString ref;
     QString id;
+    QString sessionId;
+    QString fingerprint;
     QString text;
     QStringList labels;
     QString marker;
@@ -78,6 +80,7 @@ public:
 
     static QString revisionFor(const QByteArray &source);
     static QString kindName(NodeKind kind);
+    static QString enrichHtml(QString html, const QVector<Node> &nodes);
 
 private:
     EditResult applyEdits(const QByteArray &source, QJsonArray edits) const;
