@@ -8,11 +8,13 @@
 #include <QFileInfo>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QSettings>
 #include <QStandardPaths>
 
 using namespace Mustermark;
 
 DocumentController::DocumentController(QObject *parent) : QObject(parent) {
+    loadRecentFiles();
     m_themePath = QDir::homePath() + QStringLiteral("/.local/state/omarchy/current/theme/colors.toml");
     loadTheme();
     if (QFileInfo::exists(m_themePath))
@@ -76,6 +78,20 @@ QVariantList DocumentController::nodes() const {
     return values;
 }
 
+QVariantList DocumentController::recentFiles() const {
+    QVariantList values;
+    for (const QString &path : m_recentFiles) {
+        const QFileInfo file(path);
+        values.append(QVariantMap{
+            {QStringLiteral("name"), file.fileName()},
+            {QStringLiteral("directory"), file.absolutePath()},
+            {QStringLiteral("path"), path},
+            {QStringLiteral("url"), QUrl::fromLocalFile(path)},
+        });
+    }
+    return values;
+}
+
 void DocumentController::newDocument() {
     if (!m_filePath.isEmpty())
         m_watcher.removePath(m_filePath);
@@ -101,6 +117,7 @@ bool DocumentController::loadFile(const QUrl &url) {
     setConflict(false);
     setSource(result.source, false);
     watchCurrentFile();
+    recordRecentFile(path);
     setStatus(QStringLiteral("Opened %1").arg(QFileInfo(path).fileName()));
     emit filePathChanged();
     return true;
@@ -149,6 +166,7 @@ bool DocumentController::saveAs(const QUrl &url) {
     setConflict(false);
     clearRecovery();
     watchCurrentFile();
+    recordRecentFile(path);
     setStatus(QStringLiteral("Saved %1").arg(QFileInfo(path).fileName()));
     emit filePathChanged();
     emit modifiedChanged();
@@ -323,6 +341,41 @@ void DocumentController::loadTheme() {
     }
     m_theme = values;
     emit themeChanged();
+}
+
+void DocumentController::loadRecentFiles() {
+    QSettings settings;
+    const QStringList stored = settings.value(QStringLiteral("recentFiles")).toStringList();
+    for (const QString &path : stored) {
+        const QFileInfo file(path);
+        if (!file.isFile())
+            continue;
+        const QString resolved = file.canonicalFilePath();
+        if (!resolved.isEmpty() && !m_recentFiles.contains(resolved))
+            m_recentFiles.append(resolved);
+        if (m_recentFiles.size() == 10)
+            break;
+    }
+    if (m_recentFiles != stored)
+        saveRecentFiles();
+}
+
+void DocumentController::recordRecentFile(const QString &path) {
+    const QFileInfo file(path);
+    QString resolved = file.canonicalFilePath();
+    if (resolved.isEmpty())
+        resolved = file.absoluteFilePath();
+    m_recentFiles.removeAll(resolved);
+    m_recentFiles.prepend(resolved);
+    while (m_recentFiles.size() > 10)
+        m_recentFiles.removeLast();
+    saveRecentFiles();
+    emit recentFilesChanged();
+}
+
+void DocumentController::saveRecentFiles() const {
+    QSettings settings;
+    settings.setValue(QStringLiteral("recentFiles"), m_recentFiles);
 }
 
 QString DocumentController::recoveryPath() const {

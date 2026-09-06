@@ -1,12 +1,16 @@
 #include "documentcontroller.h"
 #include "markdownhighlighter.h"
 
+#include <QFile>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QImage>
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QSettings>
+#include <QTemporaryDir>
 #include <QtTest>
 
 class QmlUiTest : public QObject {
@@ -15,6 +19,7 @@ class QmlUiTest : public QObject {
 private slots:
     void continuesListWhileTyping();
     void typesSelectsAndReorganises();
+    void opensRecentWithKeyboard();
 };
 
 void QmlUiTest::continuesListWhileTyping() {
@@ -147,8 +152,66 @@ void QmlUiTest::typesSelectsAndReorganises() {
     QVERIFY(controller.source().contains(QStringLiteral("### Child")));
 }
 
+void QmlUiTest::opensRecentWithKeyboard() {
+    QSettings settings;
+    settings.remove(QStringLiteral("recentFiles"));
+    settings.sync();
+
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString firstPath = directory.filePath(QStringLiteral("first.md"));
+    const QString secondPath = directory.filePath(QStringLiteral("second.md"));
+    QFile first(firstPath);
+    QVERIFY(first.open(QIODevice::WriteOnly));
+    QCOMPARE(first.write("# First\n"), 8);
+    first.close();
+    QFile second(secondPath);
+    QVERIFY(second.open(QIODevice::WriteOnly));
+    QCOMPARE(second.write("# Second\n"), 9);
+    second.close();
+
+    DocumentController controller;
+    QVERIFY(controller.loadFile(QUrl::fromLocalFile(firstPath)));
+    QVERIFY(controller.loadFile(QUrl::fromLocalFile(secondPath)));
+    QCOMPARE(controller.recentFiles().size(), 2);
+    QCOMPARE(controller.recentFiles().at(0).toMap().value(QStringLiteral("path")).toString(),
+             QFileInfo(secondPath).canonicalFilePath());
+
+    DocumentController restored;
+    QCOMPARE(restored.recentFiles().size(), 2);
+    MarkdownHighlighter highlighter;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("documentController"), &restored);
+    engine.rootContext()->setContextProperty(QStringLiteral("markdownHighlighter"), &highlighter);
+    engine.load(QUrl(QStringLiteral("qrc:/qml/Main.qml")));
+    QCOMPARE(engine.rootObjects().size(), 1);
+
+    auto *root = engine.rootObjects().constFirst();
+    auto *window = qobject_cast<QQuickWindow *>(root);
+    QVERIFY(window);
+    QTest::qWait(50);
+    QTest::keyClick(window, Qt::Key_O, Qt::ControlModifier | Qt::ShiftModifier);
+    QTRY_VERIFY(root->property("recentVisible").toBool());
+    const QImage recentFrame = window->grabWindow();
+    QVERIFY(!recentFrame.isNull());
+    QVERIFY(recentFrame.save(QStringLiteral("/tmp/mustermark-recent-test.png")));
+
+    auto *recentList = root->findChild<QQuickItem *>(QStringLiteral("recentList"));
+    QVERIFY(recentList);
+    QCOMPARE(recentList->property("currentIndex").toInt(), 0);
+    QTest::keyClick(window, Qt::Key_Down);
+    QCOMPARE(recentList->property("currentIndex").toInt(), 1);
+    QTest::keyClick(window, Qt::Key_Return);
+    QTRY_VERIFY(!root->property("recentVisible").toBool());
+    QCOMPARE(restored.filePath(), QFileInfo(firstPath).canonicalFilePath());
+
+    settings.remove(QStringLiteral("recentFiles"));
+    settings.sync();
+}
+
 int main(int argc, char **argv) {
     QGuiApplication application(argc, argv);
+    QCoreApplication::setOrganizationName(QStringLiteral("MustermarkTests"));
     QCoreApplication::setApplicationName(QStringLiteral("mustermark-qml-tests"));
     QmlUiTest test;
     return QTest::qExec(&test, argc, argv);

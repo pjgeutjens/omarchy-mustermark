@@ -6,7 +6,7 @@ The project is an early working prototype. It is built for Omarchy but runs on o
 
 ## What works
 
-- Write new Markdown or open an existing file in one direct source editor.
+- Write new Markdown, open a file, or reopen one of the 10 most recent files in one source editor.
 - Select and move heading sections or list-item subtrees. Ordinary blocks can move within their section too.
 - Change one heading to an exact level or shift the selected heading branch together.
 - Autosave named files, detect conflicting disk changes, and keep recovery copies of unsaved edits.
@@ -60,8 +60,9 @@ Mustermark starts in `INSERT` mode, where normal typing and text selection work 
 | `Space` | Toggle the selected task item |
 | `Ctrl+S` | Save immediately |
 | `Ctrl+O` | Open a Markdown file |
+| `Ctrl+Shift+O` | Open the recent-files chooser |
 
-The footer exposes the same structural actions to the mouse. For headings, `title H1` through `H6` changes only the selected heading. Turn on `+children` before `promote` or `demote` to shift the selected structure and its descendants while preserving their relative levels.
+The footer exposes file and structural actions to the mouse. `recent` opens the recent-files chooser. For headings, `title H1` through `H6` changes only the selected heading. Turn on `+children` before `promote` or `demote` to shift the selected structure and its descendants while preserving their relative levels.
 
 ## Command line and local API
 

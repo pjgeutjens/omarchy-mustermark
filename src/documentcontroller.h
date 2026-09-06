@@ -16,6 +16,7 @@ class DocumentController : public QObject {
     Q_PROPERTY(QString title READ title NOTIFY filePathChanged)
     Q_PROPERTY(QString revision READ revision NOTIFY documentChanged)
     Q_PROPERTY(QVariantList nodes READ nodes NOTIFY documentChanged)
+    Q_PROPERTY(QVariantList recentFiles READ recentFiles NOTIFY recentFilesChanged)
     Q_PROPERTY(QVariantMap theme READ theme NOTIFY themeChanged)
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
     Q_PROPERTY(bool modified READ modified NOTIFY modifiedChanged)
@@ -31,6 +32,7 @@ public:
     QString title() const;
     QString revision() const { return m_document.revision; }
     QVariantList nodes() const;
+    QVariantList recentFiles() const;
     QVariantMap theme() const { return m_theme; }
     QString status() const { return m_status; }
     bool modified() const { return m_modified; }
@@ -56,6 +58,7 @@ public:
 signals:
     void sourceChanged();
     void documentChanged();
+    void recentFilesChanged();
     void filePathChanged();
     void themeChanged();
     void statusChanged();
@@ -68,6 +71,9 @@ private:
     void setConflict(bool conflict);
     void watchCurrentFile();
     void loadTheme();
+    void loadRecentFiles();
+    void recordRecentFile(const QString &path);
+    void saveRecentFiles() const;
     void writeRecovery() const;
     void clearRecovery() const;
     QString recoveryPath() const;
@@ -82,4 +88,5 @@ private:
     QVariantMap m_theme;
     QFileSystemWatcher m_watcher;
     QString m_themePath;
+    QStringList m_recentFiles;
 };

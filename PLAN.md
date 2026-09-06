@@ -108,6 +108,7 @@ mustermark api --stdio
 - `Shift+H` / `Shift+L`: promote or demote the selected heading or list item.
 - `Ctrl+Shift+H` / `Ctrl+Shift+L`: promote or demote the selection and its descendants.
 - `Space`: toggle a task.
+- `Ctrl+Shift+O`: open the recent-files chooser.
 
 Always call the modes `NORMAL` and `INSERT`. Do not use `COMMAND` as the visible name.
 
@@ -117,7 +118,7 @@ The footer is the only permanent application chrome. It borrows Powerline's mode
 
 The default footer contains plain text segments:
 
-- Left: mode, new, open, and save.
+- Left: mode, new, open, recent, and save.
 - Centre: the selected structure and its available actions.
 - Right: save status, tracking state, and cursor position.
 
@@ -138,6 +139,7 @@ Footer configuration is a later slice. It must not add a settings window to the 
 ## File behaviour
 
 - New opens an empty recoverable buffer. Save As establishes its path.
+- Keep the 10 most recently opened or newly saved files. Show them in an in-app chooser with mouse, arrow, `J`/`K`, and Enter controls.
 - Debounced autosave applies to named files; `Ctrl+S` remains available.
 - Write recovery snapshots for unsaved changes and clear them after a successful save.
 - Reload an external change automatically when the local buffer is clean.
@@ -209,7 +211,7 @@ Known unfinished work:
 - Inspect the rebuilt window on an unlocked Omarchy desktop. The current run mapped successfully, but the screen locked before a physical-display capture could be checked.
 - Test pointer hover, pointer clicks, autosave, open/save dialogs, and conflict recovery by hand.
 - Add creation commands for new lists and items to the structural API.
-- Finish shortcut remapping, recent files, recovery restoration, package metadata, README, and license file.
+- Finish shortcut remapping and recovery restoration.
 - Review list indentation rules beyond the covered fixtures. Keep refusing uncertain rewrites.
 
 ## Recommended restart

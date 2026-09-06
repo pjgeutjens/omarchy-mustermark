@@ -15,6 +15,7 @@ ApplicationWindow {
 
     property bool commandMode: false
     property bool keyHelpVisible: false
+    property bool recentVisible: false
     property bool includeDescendants: false
     property bool syncingSource: false
     property int selectedIndex: -1
@@ -288,6 +289,36 @@ ApplicationWindow {
             saveDialog.open()
     }
 
+    function prepareFileSwitch() {
+        commitSource()
+        if (documentController.filePath && documentController.modified &&
+                !documentController.conflict)
+            return documentController.save()
+        return true
+    }
+
+    function showOpenDialog() {
+        if (prepareFileSwitch())
+            openDialog.open()
+    }
+
+    function showRecent() {
+        keyHelpVisible = false
+        recentVisible = true
+        recentList.currentIndex = documentController.recentFiles.length ? 0 : -1
+        recentPane.forceActiveFocus()
+    }
+
+    function openRecent(index) {
+        const recent = documentController.recentFiles
+        if (index < 0 || index >= recent.length) return
+        if (!prepareFileSwitch()) return
+        if (documentController.loadFile(recent[index].url)) {
+            recentVisible = false
+            enterInsert(0)
+        }
+    }
+
     component FooterAction: Rectangle {
         id: actionRoot
         required property string label
@@ -421,6 +452,7 @@ ApplicationWindow {
                         { keys: "Ctrl+Shift+H/L", action: "promote / demote with children" },
                         { keys: "Space", action: "toggle task" },
                         { keys: "Ctrl+N  Ctrl+O", action: "new / open" },
+                        { keys: "Ctrl+Shift+O", action: "open recent" },
                         { keys: "Ctrl+S", action: "save" },
                         { keys: "Ctrl+Shift+S", action: "save as" },
                         { keys: "Ctrl+Q", action: "quit" }
@@ -466,6 +498,145 @@ ApplicationWindow {
         TapHandler { onTapped: window.keyHelpVisible = false }
     }
 
+    Rectangle {
+        id: recentPane
+        objectName: "recentPane"
+        anchors.fill: parent
+        visible: window.recentVisible
+        focus: visible
+        z: 20
+        color: Qt.alpha(window.canvasColor, 0.96)
+
+        Keys.onPressed: function(event) {
+            if (event.key === Qt.Key_Escape) {
+                window.recentVisible = false
+                event.accepted = true
+            } else if (event.key === Qt.Key_Down || event.key === Qt.Key_J) {
+                if (recentList.count)
+                    recentList.currentIndex = Math.min(recentList.count - 1,
+                                                       recentList.currentIndex + 1)
+                event.accepted = true
+            } else if (event.key === Qt.Key_Up || event.key === Qt.Key_K) {
+                if (recentList.count)
+                    recentList.currentIndex = Math.max(0, recentList.currentIndex - 1)
+                event.accepted = true
+            } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                window.openRecent(recentList.currentIndex)
+                event.accepted = true
+            } else if (event.key >= Qt.Key_1 && event.key <= Qt.Key_9) {
+                window.openRecent(event.key - Qt.Key_1)
+                event.accepted = true
+            } else if (event.key === Qt.Key_0) {
+                window.openRecent(9)
+                event.accepted = true
+            }
+        }
+
+        Column {
+            anchors.centerIn: parent
+            width: Math.min(720, parent.width - 80)
+            spacing: 16
+
+            Label {
+                text: "recent files"
+                color: window.accent
+                font.family: "monospace"
+                font.pixelSize: 15
+                font.bold: true
+            }
+
+            ListView {
+                id: recentList
+                objectName: "recentList"
+                width: parent.width
+                height: Math.min(contentHeight, 410)
+                model: documentController.recentFiles
+                clip: true
+                currentIndex: -1
+                spacing: 2
+
+                delegate: Rectangle {
+                    id: recentRow
+                    required property int index
+                    required property var modelData
+                    width: ListView.view.width
+                    height: 42
+                    color: ListView.isCurrentItem || recentHover.hovered
+                           ? Qt.alpha(window.foreground, 0.08) : "transparent"
+
+                    Row {
+                        anchors.fill: parent
+                        spacing: 12
+
+                        Label {
+                            width: 24
+                            height: parent.height
+                            verticalAlignment: Text.AlignVCenter
+                            horizontalAlignment: Text.AlignRight
+                            text: recentRow.index + 1
+                            color: window.muted
+                            font.family: "monospace"
+                            font.pixelSize: 11
+                        }
+                        Column {
+                            width: parent.width - 36
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: 2
+                            Label {
+                                width: parent.width
+                                text: recentRow.modelData.name
+                                color: window.foreground
+                                elide: Text.ElideMiddle
+                                font.family: "monospace"
+                                font.pixelSize: 12
+                                font.bold: true
+                            }
+                            Label {
+                                width: parent.width
+                                text: recentRow.modelData.directory
+                                color: window.muted
+                                elide: Text.ElideMiddle
+                                font.family: "monospace"
+                                font.pixelSize: 10
+                            }
+                        }
+                    }
+
+                    HoverHandler { id: recentHover }
+                    TapHandler {
+                        onTapped: {
+                            recentList.currentIndex = recentRow.index
+                            window.openRecent(recentRow.index)
+                        }
+                    }
+                }
+            }
+
+            Label {
+                visible: recentList.count === 0
+                width: parent.width
+                text: "No recent files. Ctrl+O opens a file."
+                color: window.muted
+                font.family: "monospace"
+                font.pixelSize: 12
+            }
+
+            Label {
+                visible: recentList.count > 0
+                width: parent.width
+                text: "1–9 opens · J/K or arrows select · Enter opens · Esc closes"
+                color: window.muted
+                font.family: "monospace"
+                font.pixelSize: 11
+            }
+        }
+
+        TapHandler {
+            acceptedButtons: Qt.RightButton
+            onTapped: window.recentVisible = false
+        }
+    }
+
     footer: Rectangle {
         implicitHeight: 31
         color: Qt.darker(window.canvasColor, 1.16)
@@ -500,7 +671,8 @@ ApplicationWindow {
                     window.enterInsert(0)
                 }
             }
-            FooterAction { label: "open"; onTriggered: openDialog.open() }
+            FooterAction { label: "open"; onTriggered: window.showOpenDialog() }
+            FooterAction { label: "recent"; onTriggered: window.showRecent() }
             FooterAction { label: "save"; onTriggered: window.saveNow() }
 
             Rectangle {
@@ -701,10 +873,14 @@ ApplicationWindow {
         }
     }
 
-    Shortcut { sequence: "Escape"; enabled: !window.commandMode; onActivated: window.enterNormal() }
+    Shortcut {
+        sequence: "Escape"
+        enabled: !window.commandMode && !window.recentVisible
+        onActivated: window.enterNormal()
+    }
     Shortcut {
         sequence: "?"
-        enabled: window.commandMode
+        enabled: window.commandMode && !window.recentVisible
         onActivated: window.keyHelpVisible = !window.keyHelpVisible
     }
     Shortcut {
@@ -712,35 +888,40 @@ ApplicationWindow {
         enabled: window.keyHelpVisible
         onActivated: window.keyHelpVisible = false
     }
-    Shortcut { sequence: "I"; enabled: window.commandMode; onActivated: window.enterInsert() }
-    Shortcut { sequence: "Return"; enabled: window.commandMode; onActivated: window.enterInsert() }
-    Shortcut { sequence: "J"; enabled: window.commandMode; onActivated: window.selectRelative(1) }
-    Shortcut { sequence: "K"; enabled: window.commandMode; onActivated: window.selectRelative(-1) }
-    Shortcut { sequence: "Shift+J"; enabled: window.commandMode; onActivated: window.moveRelative(1) }
-    Shortcut { sequence: "Shift+K"; enabled: window.commandMode; onActivated: window.moveRelative(-1) }
+    Shortcut {
+        sequence: "Escape"
+        enabled: window.recentVisible
+        onActivated: window.recentVisible = false
+    }
+    Shortcut { sequence: "I"; enabled: window.commandMode && !window.recentVisible; onActivated: window.enterInsert() }
+    Shortcut { sequence: "Return"; enabled: window.commandMode && !window.recentVisible; onActivated: window.enterInsert() }
+    Shortcut { sequence: "J"; enabled: window.commandMode && !window.recentVisible; onActivated: window.selectRelative(1) }
+    Shortcut { sequence: "K"; enabled: window.commandMode && !window.recentVisible; onActivated: window.selectRelative(-1) }
+    Shortcut { sequence: "Shift+J"; enabled: window.commandMode && !window.recentVisible; onActivated: window.moveRelative(1) }
+    Shortcut { sequence: "Shift+K"; enabled: window.commandMode && !window.recentVisible; onActivated: window.moveRelative(-1) }
     Shortcut {
         sequence: "Shift+H"
-        enabled: window.commandMode && window.canShiftLevel(-1, false)
+        enabled: window.commandMode && !window.recentVisible && window.canShiftLevel(-1, false)
         onActivated: window.shiftSelected("promote", false)
     }
     Shortcut {
         sequence: "Shift+L"
-        enabled: window.commandMode && window.canShiftLevel(1, false)
+        enabled: window.commandMode && !window.recentVisible && window.canShiftLevel(1, false)
         onActivated: window.shiftSelected("demote", false)
     }
     Shortcut {
         sequence: "Ctrl+Shift+H"
-        enabled: window.commandMode && window.canShiftLevel(-1, true)
+        enabled: window.commandMode && !window.recentVisible && window.canShiftLevel(-1, true)
         onActivated: window.shiftSelected("promote", true)
     }
     Shortcut {
         sequence: "Ctrl+Shift+L"
-        enabled: window.commandMode && window.canShiftLevel(1, true)
+        enabled: window.commandMode && !window.recentVisible && window.canShiftLevel(1, true)
         onActivated: window.shiftSelected("demote", true)
     }
     Shortcut {
         sequence: "Space"
-        enabled: window.commandMode && window.selectedNode && window.selectedNode.task
+        enabled: window.commandMode && !window.recentVisible && window.selectedNode && window.selectedNode.task
         onActivated: window.applySelected("toggle_task")
     }
     Shortcut {
@@ -750,7 +931,16 @@ ApplicationWindow {
             window.enterInsert(0)
         }
     }
-    Shortcut { sequence: "Ctrl+O"; onActivated: openDialog.open() }
+    Shortcut { sequence: "Ctrl+O"; onActivated: window.showOpenDialog() }
+    Shortcut {
+        sequence: "Ctrl+Shift+O"
+        onActivated: {
+            if (window.recentVisible)
+                window.recentVisible = false
+            else
+                window.showRecent()
+        }
+    }
     Shortcut { sequence: "Ctrl+S"; onActivated: window.saveNow() }
     Shortcut { sequence: "Ctrl+Shift+S"; onActivated: { window.commitSource(); saveDialog.open() } }
     Shortcut { sequence: "Ctrl+Q"; onActivated: window.close() }
