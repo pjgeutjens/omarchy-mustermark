@@ -6,7 +6,9 @@ The same structural operations are available to scripts and agents through a CLI
 
 This is an early release for Omarchy and Arch Linux on x86_64. Other Linux desktops and architectures are not yet release-tested.
 
-[Watch the demo (2 min 26 sec)](docs/mustermark-demo.mp4)
+Watch the demo (2 min 26 sec):
+
+https://github.com/user-attachments/assets/c4fe6105-bad9-4ec2-a218-769d9400a1bd
 
 The demo covers structural editing, Normal/Insert/Visual modes, image attachments, a few CSS color changes, and the live API.
 
