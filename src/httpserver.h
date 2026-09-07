@@ -6,6 +6,7 @@
 #include <QSet>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QVector>
 
 #include <memory>
 
@@ -21,6 +22,8 @@ public:
     explicit DocumentHttpServer(DocumentController *controller, QString stylePath = {},
                                 QObject *parent = nullptr);
 
+    ~DocumentHttpServer() override;
+
     bool listen(quint16 port = 0);
     quint16 port() const;
     QString token() const { return m_token; }
@@ -28,6 +31,11 @@ public:
                                                                  : m_errorString; }
 
 private:
+    struct UndoEntry {
+        QByteArray source;
+        QString resultingRevision;
+    };
+
     struct Request {
         QByteArray method;
         QByteArray target;
@@ -46,6 +54,7 @@ private:
     void recordInstruction(const QJsonObject &instruction, const QJsonObject &result);
     void sendEventStream(QTcpSocket *socket);
     void broadcastChange();
+    bool sendDocumentAsset(QTcpSocket *socket, const QString &requestPath);
     QByteArray styleSheet() const;
     QByteArray page() const;
 
@@ -60,6 +69,7 @@ private:
     QTcpServer m_server;
     QSet<QTcpSocket *> m_eventClients;
     QJsonArray m_instructions;
+    QVector<UndoEntry> m_undo;
     int m_sequence = 0;
 };
 

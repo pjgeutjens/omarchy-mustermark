@@ -2,3 +2,7 @@ build/
 cmake-build-*/
 *.user
 *.autosave
+
+# Local planning and execution evidence live outside the release tree.
+/release-evidence/
+/*PLAN.md

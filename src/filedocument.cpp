@@ -8,14 +8,17 @@
 
 namespace Mustermark {
 
-FileResult FileDocument::read(const QString &path) {
+FileResult FileDocument::read(const QString &path, qint64 maxBytes) {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly))
         return {false, {}, file.errorString()};
-    return {true, file.readAll(), {}};
+    const QByteArray source = maxBytes < 0 ? file.readAll() : file.read(maxBytes + 1);
+    if (maxBytes >= 0 && source.size() > maxBytes)
+        return {false, {}, QStringLiteral("file_too_large")};
+    return {true, source, {}};
 }
 
-FileResult FileDocument::writeAtomic(const QString &path, const QByteArray &source,
+FileResult FileDocument::writeRaw(const QString &path, const QByteArray &source,
                                      const QString &expectedRevision) {
     QFileInfo existing(path);
     const bool existed = existing.exists();
@@ -33,6 +36,8 @@ FileResult FileDocument::writeAtomic(const QString &path, const QByteArray &sour
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly))
         return {false, {}, file.errorString()};
+    if (!existed && path.endsWith(QStringLiteral(".mustermark.json")))
+        file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
     if (file.write(source) != source.size()) {
         file.cancelWriting();
         return {false, {}, file.errorString()};

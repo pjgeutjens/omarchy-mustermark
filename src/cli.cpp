@@ -40,6 +40,15 @@ QJsonObject inspectPath(const QString &path, DocumentEngine &engine) {
     return result;
 }
 
+QJsonObject snapshotPath(const QString &path, const QString &node, const QString &scope) {
+    const FileResult file = FileDocument::read(path);
+    if (!file.ok)
+        return errorObject(QStringLiteral("read_failed"), file.error);
+    DocumentSession session;
+    session.setSource(file.source);
+    return session.snapshot(QFileInfo(path).absoluteFilePath(), node, scope);
+}
+
 QJsonObject mutatePath(const QString &path, const QString &operation,
                        const QJsonObject &params, DocumentEngine &engine) {
     const FileResult file = FileDocument::read(path);
@@ -74,6 +83,9 @@ QJsonObject sessionPayload(const QString &path, const DocumentSession &session,
     result.insert(QStringLiteral("source"), QString::fromUtf8(session.document().source));
     result.insert(QStringLiteral("html"), session.document().renderedHtml);
     result.insert(QStringLiteral("edits"), edits);
+    result.insert(QStringLiteral("externalIdBindingVersion"), 1);
+    result.insert(QStringLiteral("identityScope"), QStringLiteral("session"));
+    result.insert(QStringLiteral("externalIdScope"), session.document().documentId.isEmpty() ? "session" : "document");
     return result;
 }
 
@@ -96,7 +108,12 @@ QJsonObject handleRequest(
         payload = errorObject(QStringLiteral("path_required"), QStringLiteral("params.path is required"));
     } else {
         const QString absolutePath = QFileInfo(path).absoluteFilePath();
-        const FileResult file = FileDocument::read(absolutePath);
+        const bool linkedRequest = method.startsWith(QStringLiteral("document.link.")) ||
+            QFileInfo::exists(QFileInfo(absolutePath).canonicalFilePath() + ".mustermark.json");
+        if (linkedRequest && !QFileInfo(absolutePath).isFile())
+            return {{"jsonrpc", "2.0"}, {"id", id},
+                    {"result", errorObject("invalid_linked_source", "A regular source file is required.")}};
+        const FileResult file = FileDocument::read(absolutePath, linkedRequest ? 2 * 1024 * 1024 : -1);
         if (!file.ok) {
             payload = errorObject(QStringLiteral("read_failed"), file.error);
         } else {
@@ -107,8 +124,23 @@ QJsonObject handleRequest(
             }
             session->setSource(file.source);
 
+            const bool initialize = method == QStringLiteral("document.link.initialize");
+            const bool linked = initialize || method == QStringLiteral("document.link.inspect") ||
+                QFileInfo::exists(QFileInfo(absolutePath).canonicalFilePath() + QStringLiteral(".mustermark.json"));
+            if (linked) {
+                const auto loaded = FileDocument::readLinked(absolutePath, *session, initialize);
+                if (!loaded.ok)
+                    return {{"jsonrpc", "2.0"}, {"id", id},
+                            {"result", errorObject(loaded.error, loaded.error)}};
+                if (session->document().source != file.source)
+                    return {{"jsonrpc", "2.0"}, {"id", id},
+                            {"result", errorObject("stale_revision", "Source changed during inspection.")}};
+            }
+
             EditResult edit{true, file.source, {}, {}, {}};
             if (method == QStringLiteral("document.inspect") ||
+                method == QStringLiteral("document.link.initialize") ||
+                method == QStringLiteral("document.link.inspect") ||
                 method == QStringLiteral("document.validate")) {
                 payload = sessionPayload(absolutePath, *session);
             } else if (method == QStringLiteral("document.track") ||
@@ -127,6 +159,30 @@ QJsonObject handleRequest(
                                           params.value(QStringLiteral("action")).toString(),
                                           params.value(QStringLiteral("node")).toString(), params);
                 }
+            } else if (method == QStringLiteral("document.snapshot")) {
+                if (params.contains("baseRevision") && params.value("baseRevision").toString() != session->document().revision)
+                    payload = errorObject("stale_revision", "The source changed before its snapshot.");
+                else payload = session->snapshot(absolutePath,
+                                            params.value(QStringLiteral("node")).toString(),
+                                            params.value(QStringLiteral("scope")).toString(
+                                                QStringLiteral("item")), params.value("includeAttachmentData").toBool());
+            } else if (method == QStringLiteral("document.external_id.bind") ||
+                       method == QStringLiteral("document.external_id.resolve")) {
+                const QString node = params.value(QStringLiteral("node")).toString();
+                if (method.endsWith(QStringLiteral(".bind")) && node.isEmpty())
+                    payload = errorObject(QStringLiteral("node_required"),
+                                          QStringLiteral("Binding requires a session node ID."));
+                else
+                    payload = session->externalBinding(
+                        params.value(QStringLiteral("baseRevision")).toString(),
+                        params.value(QStringLiteral("namespace")).toString(),
+                        params.value(QStringLiteral("value")).toString(),
+                        method.endsWith(QStringLiteral(".bind")) ? node : QString());
+                if (method.endsWith(QStringLiteral(".bind")) && linked && payload.value("ok").toBool()) {
+                    const auto saved = FileDocument::writeAtomic(absolutePath, session->document().source,
+                                                                 session->document().revision, session.data());
+                    if (!saved.ok) payload = errorObject(saved.error, saved.error);
+                }
             } else {
                 return {{QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
                         {QStringLiteral("id"), id},
@@ -140,7 +196,7 @@ QJsonObject handleRequest(
                 } else if (session->document().source != file.source) {
                     const FileResult written = FileDocument::writeAtomic(
                         absolutePath, session->document().source,
-                        DocumentEngine::revisionFor(file.source));
+                        DocumentEngine::revisionFor(file.source), session.data());
                     if (!written.ok)
                         payload = errorObject(
                             written.error == QStringLiteral("stale_revision")
@@ -198,7 +254,7 @@ bool Cli::isCommand(const QStringList &arguments) {
         return false;
     static const QStringList commands{
         QStringLiteral("inspect"), QStringLiteral("validate"), QStringLiteral("strip-metadata"),
-        QStringLiteral("apply"),
+        QStringLiteral("apply"), QStringLiteral("snapshot"),
         QStringLiteral("api"), QStringLiteral("serve"), QStringLiteral("--help"),
         QStringLiteral("--version")};
     return commands.contains(arguments.at(1));
@@ -208,15 +264,18 @@ int Cli::run(const QStringList &arguments) {
     DocumentEngine engine;
     const QString command = arguments.value(1);
     if (command == QStringLiteral("--version")) {
-        QTextStream(stdout) << "mustermark 0.1.0" << Qt::endl;
+        QTextStream(stdout) << "mustermark 0.2.0" << Qt::endl;
         return 0;
     }
     if (command == QStringLiteral("--help") || arguments.size() < 3) {
         QTextStream(stdout)
             << "Usage:\n"
-            << "  mustermark FILE.md [--serve[=PORT]] [--html-style=FILE.css]\n"
+            << "  mustermark FILE.md [--visual] [--serve[=PORT]] [--html-style=FILE.css]\n"
+            << "  mustermark --visual FILE.md\n"
+            << "  mustermark append FILE.md [--section=NAME] [--kind=task|bullet]\n"
             << "  mustermark inspect|validate|strip-metadata FILE.md\n"
             << "  mustermark apply FILE.md ACTION NODE [--scope=self|subtree] [--target=REF] [--checked=true|false] [--text=TEXT] [--level=N]\n"
+            << "  mustermark snapshot FILE.md NODE [--scope=item|section]\n"
             << "  mustermark serve FILE.md [--port=N] [--html-style=FILE.css]\n"
             << "  mustermark api --stdio\n";
         return command == QStringLiteral("--help") ? 0 : 64;
@@ -233,6 +292,20 @@ int Cli::run(const QStringList &arguments) {
         }
         return serveDocument(arguments.at(2), static_cast<quint16>(parsedPort),
                              argumentValue(arguments, QStringLiteral("html-style")));
+    }
+
+    if (command == QStringLiteral("snapshot")) {
+        if (arguments.size() < 4) {
+            printJson(errorObject(QStringLiteral("usage"), QStringLiteral("NODE is required")));
+            return 64;
+        }
+        const QJsonObject result = snapshotPath(
+            arguments.at(2), arguments.at(3),
+            argumentValue(arguments, QStringLiteral("scope")).isEmpty()
+                ? QStringLiteral("item")
+                : argumentValue(arguments, QStringLiteral("scope")));
+        printJson(result);
+        return result.value(QStringLiteral("ok")).toBool() ? 0 : 1;
     }
 
     const QString path = arguments.value(2);

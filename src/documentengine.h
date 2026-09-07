@@ -16,14 +16,24 @@ enum class NodeKind {
     Block,
 };
 
+struct Attachment {
+    QString path;
+    QString alt;
+    int line = 0;
+    qsizetype startByte = 0;
+    qsizetype endByte = 0;
+};
+
 struct Node {
     NodeKind kind = NodeKind::Block;
     QString ref;
     QString id;
     QString sessionId;
+    QString durableId;
     QString fingerprint;
     QString text;
     QStringList labels;
+    QVector<Attachment> attachments;
     QString marker;
     int level = 0;
     int depth = 0;
@@ -52,8 +62,12 @@ struct Document {
     QString revision;
     QVector<Node> nodes;
     QVector<Diagnostic> diagnostics;
+    QStringList invalidatedIds;
     QString renderedHtml;
     bool tracked = false;
+    QString documentId;
+    qint64 identityGeneration = 0;
+    QJsonObject externalBindings;
     int trackingVersion = 0;
 
     QJsonObject toJson() const;
@@ -71,8 +85,6 @@ struct EditResult {
 class DocumentEngine {
 public:
     Document parse(const QByteArray &source) const;
-    EditResult track(const QByteArray &source) const;
-    EditResult repair(const QByteArray &source) const;
     EditResult untrack(const QByteArray &source) const;
     EditResult apply(const QByteArray &source, const QString &baseRevision,
                      const QString &action, const QString &nodeIdentity,
@@ -84,6 +96,8 @@ public:
 
 private:
     EditResult applyEdits(const QByteArray &source, QJsonArray edits) const;
+    QByteArray renumberOrderedLists(const QByteArray &source, int forcedOrdinal = -1,
+                                    int forcedStart = 1) const;
 };
 
 } // namespace Mustermark

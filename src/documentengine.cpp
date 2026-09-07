@@ -5,11 +5,11 @@
 #include <cmark-gfm.h>
 
 #include <QCryptographicHash>
+#include <QDir>
 #include <QHash>
 #include <QJsonDocument>
 #include <QRegularExpression>
 #include <QSet>
-#include <QUuid>
 
 #include <algorithm>
 #include <cstdlib>
@@ -72,6 +72,8 @@ const QRegularExpression itemPattern(
     QStringLiteral(R"(^(\s*)((?:[-+*])|(?:\d+[.)]))(\s+)(?:\[([ xX])\](\s*))?(.*)$)"));
 const QRegularExpression atxHeadingPattern(
     QStringLiteral(R"(^(\s*)(#{1,6})(\s+)(.*?)(\s+#+\s*)?$)"));
+const QRegularExpression attachmentPattern(
+    QStringLiteral(R"(^(\s*)!\[([^\]\r\n]*)\]\(([^()\s]+)\)\s*$)"));
 
 Metadata parseMetadata(const QByteArray &line) {
     const auto match = metadataPattern.match(QString::fromUtf8(line));
@@ -87,10 +89,6 @@ Metadata parseMetadata(const QByteArray &line) {
         std::sort(result.labels.begin(), result.labels.end());
     }
     return result;
-}
-
-QString newId(const QString &prefix) {
-    return prefix + QUuid::createUuid().toString(QUuid::WithoutBraces).toLower();
 }
 
 QString metadataLine(const QString &indent, const QString &kind, const QString &id,
@@ -147,7 +145,7 @@ QString enrichedHtml(QString html, const QVector<Node> &nodes) {
                  QStringLiteral("\n"));
     html.remove(QRegularExpression(QStringLiteral(R"(\sdata-mm-(?:kind|ref|id|fingerprint|level|depth|labels|task|checked)="[^"]*")")));
     const QRegularExpression openingTag(
-        QStringLiteral(R"(<(h[1-6]|ul|ol|li)\b([^>]*\bdata-sourcepos="(\d+):\d+-(\d+):\d+"[^>]*)>)"));
+        QStringLiteral(R"(<(h[1-6]|ul|ol|li|p)\b([^>]*\bdata-sourcepos="(\d+):\d+-(\d+):\d+"[^>]*)>)"));
     QRegularExpressionMatchIterator matches = openingTag.globalMatch(html);
     struct Injection { qsizetype position; QString attributes; };
     QVector<Injection> injections;
@@ -158,7 +156,9 @@ QString enrichedHtml(QString html, const QVector<Node> &nodes) {
         const NodeKind wantedKind = tag == QStringLiteral("li")
                                       ? NodeKind::Item
                                       : (tag == QStringLiteral("ul") || tag == QStringLiteral("ol"))
-                                            ? NodeKind::List : NodeKind::Heading;
+                                            ? NodeKind::List
+                                            : tag == QStringLiteral("p") ? NodeKind::Block
+                                                                         : NodeKind::Heading;
         const auto node = std::find_if(nodes.cbegin(), nodes.cend(), [&](const Node &candidate) {
             return candidate.kind == wantedKind && candidate.startLine == startLine;
         });
@@ -225,20 +225,19 @@ QByteArray shiftIndent(const QByteArray &block, int delta, bool *ok) {
     return result;
 }
 
-int frontMatterEnd(const Lines &lines) {
-    if (lines.count() == 0 || lines.bytes(1).trimmed() != "---")
-        return 0;
-    for (int line = 2; line <= lines.count(); ++line) {
-        const QByteArray value = lines.bytes(line).trimmed();
-        if (value == "---" || value == "...")
-            return line;
-    }
-    return 0;
-}
-
 bool validLabel(const QString &label) {
     static const QRegularExpression pattern(QStringLiteral(R"(^[a-z0-9][a-z0-9_.\/-]{0,63}$)"));
     return pattern.match(label).hasMatch() && !label.contains(QStringLiteral("--"));
+}
+
+bool validAttachmentPath(const QString &path) {
+    if (path.isEmpty() || path.size() > 512 || !QDir::isRelativePath(path) ||
+        path.contains(QLatin1Char('\n')) || path.contains(QLatin1Char('\r')) ||
+        path.contains(QLatin1Char('(')) || path.contains(QLatin1Char(')')))
+        return false;
+    const QString clean = QDir::cleanPath(path);
+    return clean != QStringLiteral(".") && clean != QStringLiteral("..") &&
+           !clean.startsWith(QStringLiteral("../"));
 }
 
 QJsonObject diagnosticJson(const Diagnostic &diagnostic) {
@@ -271,6 +270,7 @@ QString DocumentEngine::enrichHtml(QString html, const QVector<Node> &nodes) {
 int Document::findNode(const QString &identity) const {
     for (int index = 0; index < nodes.size(); ++index) {
         if (nodes.at(index).sessionId == identity || nodes.at(index).id == identity ||
+            (!identity.isEmpty() && nodes.at(index).durableId == identity) ||
             nodes.at(index).ref == identity)
             return index;
     }
@@ -278,6 +278,36 @@ int Document::findNode(const QString &identity) const {
 }
 
 QJsonObject Document::toJson() const {
+    QJsonArray sections;
+    QJsonArray unsectionedLists;
+    for (int index = 0; index < nodes.size(); ++index) {
+        const Node &heading = nodes.at(index);
+        if (heading.kind == NodeKind::List && heading.parent < 0)
+            unsectionedLists.append(externalIdentity(heading));
+        if (heading.kind != NodeKind::Heading)
+            continue;
+        QJsonArray lists;
+        QJsonArray items;
+        for (int child : heading.children) {
+            const Node &list = nodes.at(child);
+            if (list.kind != NodeKind::List)
+                continue;
+            lists.append(externalIdentity(list));
+            for (int item : list.children)
+                if (nodes.at(item).kind == NodeKind::Item)
+                    items.append(externalIdentity(nodes.at(item)));
+        }
+        if (lists.isEmpty())
+            continue;
+        QStringList path;
+        for (int ancestor = index; ancestor >= 0; ancestor = nodes.at(ancestor).parent)
+            if (nodes.at(ancestor).kind == NodeKind::Heading)
+                path.prepend(nodes.at(ancestor).text);
+        sections.append(QJsonObject{{QStringLiteral("node"), externalIdentity(heading)},
+            {QStringLiteral("durableId"), heading.durableId},
+            {QStringLiteral("path"), QJsonArray::fromStringList(path)},
+            {QStringLiteral("lists"), lists}, {QStringLiteral("items"), items}});
+    }
     QJsonArray nodeArray;
     for (int index = 0; index < nodes.size(); ++index) {
         const Node &node = nodes.at(index);
@@ -288,6 +318,7 @@ QJsonObject Document::toJson() const {
         }
         QJsonObject value{
             {QStringLiteral("ref"), externalIdentity(node)},
+            {QStringLiteral("sourceRef"), node.ref},
             {QStringLiteral("kind"), DocumentEngine::kindName(node.kind)},
             {QStringLiteral("text"), node.text},
             {QStringLiteral("level"), node.level},
@@ -307,6 +338,8 @@ QJsonObject Document::toJson() const {
             value.insert(QStringLiteral("id"), node.id);
         if (!node.fingerprint.isEmpty())
             value.insert(QStringLiteral("fingerprint"), node.fingerprint);
+        if (!node.durableId.isEmpty())
+            value.insert(QStringLiteral("durableId"), node.durableId);
         if (node.parent >= 0) {
             const Node &parentNode = nodes.at(node.parent);
             value.insert(QStringLiteral("parent"), externalIdentity(parentNode));
@@ -315,20 +348,40 @@ QJsonObject Document::toJson() const {
         for (const QString &label : node.labels)
             labels.append(label);
         value.insert(QStringLiteral("labels"), labels);
+        QJsonArray attachments;
+        for (const Attachment &attachment : node.attachments) {
+            attachments.append(QJsonObject{
+                {QStringLiteral("path"), attachment.path},
+                {QStringLiteral("alt"), attachment.alt},
+                {QStringLiteral("line"), attachment.line},
+            });
+        }
+        value.insert(QStringLiteral("attachments"), attachments);
         nodeArray.append(value);
     }
 
     QJsonArray diagnosticArray;
     for (const Diagnostic &diagnostic : diagnostics)
         diagnosticArray.append(diagnosticJson(diagnostic));
+    QJsonArray invalidatedArray;
+    for (const QString &identity : invalidatedIds)
+        invalidatedArray.append(identity);
 
     return {
-        {QStringLiteral("apiVersion"), QStringLiteral("0.1")},
+        {QStringLiteral("apiVersion"), QStringLiteral("0.2")},
+        {QStringLiteral("sectionSchemaVersion"), 1},
+        {QStringLiteral("documentId"), documentId},
+        {QStringLiteral("durableHeadingIdentityVersion"), documentId.isEmpty() ? 0 : 1},
+        {QStringLiteral("durableTaskIdentityVersion"), documentId.isEmpty() ? 0 : 1},
+        {QStringLiteral("identityGeneration"), identityGeneration},
+        {QStringLiteral("sections"), sections},
+        {QStringLiteral("unsectionedLists"), unsectionedLists},
         {QStringLiteral("revision"), revision},
         {QStringLiteral("tracked"), tracked},
         {QStringLiteral("trackingVersion"), trackingVersion},
         {QStringLiteral("nodes"), nodeArray},
         {QStringLiteral("diagnostics"), diagnosticArray},
+        {QStringLiteral("invalidatedIds"), invalidatedArray},
     };
 }
 
@@ -421,6 +474,22 @@ Document DocumentEngine::parse(const QByteArray &source) const {
                         node.checked = node.task && match.captured(4).toLower() == QStringLiteral("x");
                         node.text = match.captured(6).trimmed();
                     }
+                    const int itemIndent = leadingSpaces(firstLine);
+                    int structuralEnd = node.endLine;
+                    for (int line = node.startLine + 1; line <= node.endLine; ++line) {
+                        const QByteArray candidate = lines.bytes(line);
+                        if (candidate.trimmed().isEmpty())
+                            continue;
+                        if (leadingSpaces(candidate) <= itemIndent) {
+                            structuralEnd = line - 1;
+                            break;
+                        }
+                    }
+                    while (structuralEnd > node.startLine &&
+                           lines.bytes(structuralEnd).trimmed().isEmpty())
+                        --structuralEnd;
+                    node.endLine = structuralEnd;
+                    node.endByte = lines.end(node.endLine);
                     if (node.startLine + 1 <= node.endLine) {
                         const Metadata metadata = parseMetadata(lines.bytes(node.startLine + 1));
                         if (metadata.valid && metadata.kind == QStringLiteral("item")) {
@@ -430,6 +499,21 @@ Document DocumentEngine::parse(const QByteArray &source) const {
                             node.metadataStart = lines.start(node.metadataLine);
                             node.metadataEnd = lines.end(node.metadataLine);
                         }
+                    }
+                    const int attachmentIndent = match.hasMatch()
+                                                     ? match.capturedEnd(3)
+                                                     : itemIndent + 2;
+                    for (int line = node.startLine + 1; line <= node.endLine; ++line) {
+                        const QByteArray candidate = lines.bytes(line);
+                        if (leadingSpaces(candidate) != attachmentIndent)
+                            continue;
+                        const auto attachment = attachmentPattern.match(QString::fromUtf8(candidate));
+                        if (!attachment.hasMatch() || !validAttachmentPath(attachment.captured(3)))
+                            continue;
+                        node.attachments.append({
+                            QDir::cleanPath(attachment.captured(3)), attachment.captured(2), line,
+                            lines.start(line), lines.end(line),
+                        });
                     }
                 }
             } else {
@@ -539,75 +623,54 @@ EditResult DocumentEngine::applyEdits(const QByteArray &source, QJsonArray edits
     return {true, changed, {}, {}, edits};
 }
 
-EditResult DocumentEngine::track(const QByteArray &source) const {
+QByteArray DocumentEngine::renumberOrderedLists(const QByteArray &source, int forcedOrdinal,
+                                                int forcedStart) const {
     const Document document = parse(source);
     const Lines lines(source);
     QJsonArray edits;
-
-    if (!document.tracked) {
-        const int frontMatter = frontMatterEnd(lines);
-        const qsizetype offset = frontMatter > 0 ? lines.end(frontMatter) : 0;
-        const QString marker = QStringLiteral("<!-- mustermark:tracking version=1 -->\n\n");
-        edits.append(QJsonObject{{QStringLiteral("startByte"), static_cast<double>(offset)},
-                                 {QStringLiteral("endByte"), static_cast<double>(offset)},
-                                 {QStringLiteral("text"), marker}});
-    }
-
-    for (const Node &node : document.nodes) {
-        if ((node.kind != NodeKind::List && node.kind != NodeKind::Item) || !node.id.isEmpty())
+    int orderedOrdinal = 0;
+    for (const Node &list : document.nodes) {
+        if (list.kind != NodeKind::List || !list.ordered)
             continue;
-        if (node.kind == NodeKind::List) {
-            const QByteArray firstLine = lines.bytes(node.startLine);
-            const QString comment = metadataLine(lineIndent(firstLine), QStringLiteral("list"),
-                                                 newId(QStringLiteral("lst_")), {});
-            edits.append(QJsonObject{{QStringLiteral("startByte"), static_cast<double>(lines.start(node.startLine))},
-                          {QStringLiteral("endByte"), static_cast<double>(lines.start(node.startLine))},
-                          {QStringLiteral("text"), comment + QLatin1Char('\n')}});
-        } else {
-            const QByteArray firstLine = lines.bytes(node.startLine);
-            const QString indent = QString(leadingSpaces(firstLine) + 2, QLatin1Char(' '));
-            const QString comment = metadataLine(indent, QStringLiteral("item"),
-                                                 newId(QStringLiteral("itm_")), {});
-            const qsizetype offset = lines.end(node.startLine);
-            const bool endedWithNewline = offset > lines.start(node.startLine) && source.at(offset - 1) == '\n';
-            const QString insertion = endedWithNewline ? comment + QLatin1Char('\n')
-                                                       : QLatin1Char('\n') + comment;
-            edits.append(QJsonObject{{QStringLiteral("startByte"), static_cast<double>(offset)},
-                          {QStringLiteral("endByte"), static_cast<double>(offset)},
-                          {QStringLiteral("text"), insertion}});
+        QVector<const Node *> items;
+        for (const int childIndex : list.children) {
+            const Node &child = document.nodes.at(childIndex);
+            if (child.kind == NodeKind::Item)
+                items.append(&child);
+        }
+        if (items.isEmpty())
+            continue;
+        const auto firstMatch = itemPattern.match(QString::fromUtf8(lines.bytes(items.first()->startLine)));
+        if (!firstMatch.hasMatch())
+            continue;
+        const QString firstMarker = firstMatch.captured(2);
+        bool validStart = false;
+        int start = firstMarker.chopped(1).toInt(&validStart);
+        if (!validStart)
+            continue;
+        if (orderedOrdinal == forcedOrdinal)
+            start = forcedStart;
+        ++orderedOrdinal;
+        for (int position = 0; position < items.size(); ++position) {
+            const Node &item = *items.at(position);
+            const auto match = itemPattern.match(QString::fromUtf8(lines.bytes(item.startLine)));
+            if (!match.hasMatch())
+                continue;
+            const QString marker = match.captured(2);
+            const QString number = marker.chopped(1);
+            const QString expected = QString::number(start + position);
+            if (number == expected)
+                continue;
+            const qsizetype markerStart = lines.start(item.startLine) + match.capturedStart(2);
+            edits.append(QJsonObject{
+                {QStringLiteral("startByte"), static_cast<double>(markerStart)},
+                {QStringLiteral("endByte"), static_cast<double>(markerStart + number.toUtf8().size())},
+                {QStringLiteral("text"), expected},
+            });
         }
     }
-
-    return applyEdits(source, edits);
-}
-
-EditResult DocumentEngine::repair(const QByteArray &source) const {
-    const Document document = parse(source);
-    QSet<QString> seen;
-    QJsonArray edits;
-    const Lines lines(source);
-    for (const Node &node : document.nodes) {
-        if (node.id.isEmpty() || node.metadataLine < 1)
-            continue;
-        if (!seen.contains(node.id)) {
-            seen.insert(node.id);
-            continue;
-        }
-        const QString replacement = metadataLine(
-            lineIndent(lines.bytes(node.metadataLine)), kindName(node.kind),
-            newId(node.kind == NodeKind::List ? QStringLiteral("lst_") : QStringLiteral("itm_")),
-            node.labels);
-        QByteArray text = replacement.toUtf8();
-        if (node.metadataEnd > node.metadataStart && source.at(node.metadataEnd - 1) == '\n')
-            text += '\n';
-        edits.append(QJsonObject{{QStringLiteral("startByte"), static_cast<double>(node.metadataStart)},
-                      {QStringLiteral("endByte"), static_cast<double>(node.metadataEnd)},
-                      {QStringLiteral("text"), QString::fromUtf8(text)}});
-    }
-    const EditResult deduplicated = applyEdits(source, edits);
-    if (!deduplicated.ok)
-        return deduplicated;
-    return track(deduplicated.source);
+    const EditResult result = applyEdits(source, edits);
+    return result.ok ? result.source : source;
 }
 
 EditResult DocumentEngine::untrack(const QByteArray &source) const {
@@ -647,8 +710,155 @@ EditResult DocumentEngine::apply(const QByteArray &source, const QString &baseRe
     const Node &node = document.nodes.at(nodeIndex);
     const Lines lines(source);
     QJsonArray edits;
+    int affectedOrderedOrdinal = -1;
+    int affectedOrderedStart = 1;
+    int affectedListIndex = -1;
+    if (node.kind == NodeKind::Item && node.parent >= 0 &&
+        document.nodes.at(node.parent).kind == NodeKind::List &&
+        document.nodes.at(node.parent).ordered)
+        affectedListIndex = node.parent;
+    else if (action == QStringLiteral("item_add") && node.kind == NodeKind::List && node.ordered)
+        affectedListIndex = nodeIndex;
+    const bool preserveOrderedStart = action == QStringLiteral("item_add") ||
+        action == QStringLiteral("move_before") || action == QStringLiteral("move_after") ||
+        action == QStringLiteral("delete");
+    if (affectedListIndex >= 0 && preserveOrderedStart) {
+        int ordinal = 0;
+        for (int index = 0; index < document.nodes.size(); ++index) {
+            const Node &candidate = document.nodes.at(index);
+            if (candidate.kind != NodeKind::List || !candidate.ordered)
+                continue;
+            if (index == affectedListIndex) {
+                affectedOrderedOrdinal = ordinal;
+                break;
+            }
+            ++ordinal;
+        }
+        const Node &list = document.nodes.at(affectedListIndex);
+        int itemCount = 0;
+        for (const int childIndex : list.children) {
+            const Node &child = document.nodes.at(childIndex);
+            if (child.kind != NodeKind::Item)
+                continue;
+            if (itemCount == 0) {
+                bool validStart = false;
+                affectedOrderedStart = child.marker.chopped(1).toInt(&validStart);
+                if (!validStart)
+                    affectedOrderedOrdinal = -1;
+            }
+            ++itemCount;
+        }
+        if (action == QStringLiteral("delete") && itemCount <= 1)
+            affectedOrderedOrdinal = -1;
+    }
 
-    if (action == QStringLiteral("toggle_task") || action == QStringLiteral("task_set")) {
+    if (action == QStringLiteral("section_add")) {
+        if (node.kind != NodeKind::Heading)
+            return {false, source, QStringLiteral("invalid_action"),
+                    QStringLiteral("New sections must be placed after a heading."), {}};
+        const QString text = arguments.value(QStringLiteral("text")).toString().trimmed();
+        if (text.isEmpty() || text.size() > 240 || text.contains(QLatin1Char('\n')) ||
+            text.contains(QLatin1Char('\r')))
+            return {false, source, QStringLiteral("invalid_text"),
+                    QStringLiteral("Section titles must be one non-empty line of at most 240 characters."), {}};
+        const QByteArray newline = source.contains("\r\n") ? QByteArray("\r\n")
+                                                            : QByteArray("\n");
+        const qsizetype insertionOffset = node.endByte;
+        const QByteArray before = source.left(insertionOffset);
+        const QByteArray after = source.mid(insertionOffset);
+        QByteArray insertion;
+        if (!before.isEmpty() && !before.endsWith(newline + newline))
+            insertion += before.endsWith(newline) ? newline : newline + newline;
+        insertion += QByteArray(node.level, '#') + " " + text.toUtf8() + newline;
+        if (!after.isEmpty() && !after.startsWith(newline))
+            insertion += newline;
+        else if (after.isEmpty())
+            insertion += newline;
+        edits.append(QJsonObject{{QStringLiteral("startByte"), static_cast<double>(insertionOffset)},
+                      {QStringLiteral("endByte"), static_cast<double>(insertionOffset)},
+                      {QStringLiteral("text"), QString::fromUtf8(insertion)}});
+    } else if (action == QStringLiteral("list_add")) {
+        if (node.kind != NodeKind::Heading)
+            return {false, source, QStringLiteral("invalid_action"),
+                    QStringLiteral("New lists must be placed inside a section heading."), {}};
+        QString text = arguments.value(QStringLiteral("text")).toString();
+        text.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+        text = text.trimmed();
+        if (text.isEmpty() || text.size() > 65536 || text.contains(QLatin1Char('\r')))
+            return {false, source, QStringLiteral("invalid_text"),
+                    QStringLiteral("List item text must contain at most 65536 characters."), {}};
+        const QByteArray newline = source.contains("\r\n") ? QByteArray("\r\n")
+                                                            : QByteArray("\n");
+        const qsizetype insertionOffset = lines.end(node.startLine);
+        const QByteArray after = source.mid(insertionOffset);
+        const QByteArray marker = arguments.value(QStringLiteral("ordered")).toBool()
+                                      ? QByteArray("1.") : QByteArray("-");
+        const QByteArray task = arguments.value(QStringLiteral("task")).toBool()
+                                    ? QByteArray("[ ] ") : QByteArray();
+        QStringList textLines = text.split(QLatin1Char('\n'));
+        QByteArray formatted = textLines.takeFirst().toUtf8();
+        const QByteArray continuationIndent(marker.size() + 1 + task.size(), ' ');
+        for (const QString &line : textLines)
+            formatted += newline + continuationIndent + line.toUtf8();
+        QByteArray insertion = newline + marker + " " + task + formatted + newline;
+        if (!after.isEmpty() && !after.startsWith(newline))
+            insertion += newline;
+        edits.append(QJsonObject{{QStringLiteral("startByte"), static_cast<double>(insertionOffset)},
+                      {QStringLiteral("endByte"), static_cast<double>(insertionOffset)},
+                      {QStringLiteral("text"), QString::fromUtf8(insertion)}});
+    } else if (action == QStringLiteral("item_add")) {
+        if (node.kind != NodeKind::List && node.kind != NodeKind::Item)
+            return {false, source, QStringLiteral("invalid_action"),
+                    QStringLiteral("New items must be placed in a list or after another item."), {}};
+        QString text = arguments.value(QStringLiteral("text")).toString();
+        text.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+        text = text.trimmed();
+        if (text.isEmpty() || text.size() > 65536 || text.contains(QLatin1Char('\r')))
+            return {false, source, QStringLiteral("invalid_text"),
+                    QStringLiteral("List item text must contain at most 65536 characters."), {}};
+
+        int anchorIndex = nodeIndex;
+        int listIndex = node.kind == NodeKind::List ? nodeIndex : node.parent;
+        if (listIndex < 0 || document.nodes.at(listIndex).kind != NodeKind::List)
+            return {false, source, QStringLiteral("invalid_action"),
+                    QStringLiteral("The selected item is not inside a list."), {}};
+        const Node &list = document.nodes.at(listIndex);
+        if (node.kind == NodeKind::List) {
+            for (int child : list.children) {
+                if (document.nodes.at(child).kind == NodeKind::Item)
+                    anchorIndex = child;
+            }
+            if (anchorIndex == nodeIndex)
+                return {false, source, QStringLiteral("invalid_action"),
+                        QStringLiteral("An empty Markdown list has no safe insertion anchor."), {}};
+        }
+        const Node &anchor = document.nodes.at(anchorIndex);
+        const QByteArray anchorLine = lines.bytes(anchor.startLine);
+        const auto anchorMatch = itemPattern.match(QString::fromUtf8(anchorLine));
+        if (!anchorMatch.hasMatch())
+            return {false, source, QStringLiteral("unsafe_rewrite"),
+                    QStringLiteral("The list marker could not be preserved."), {}};
+        const QByteArray newline = source.contains("\r\n") ? QByteArray("\r\n")
+                                                            : QByteArray("\n");
+        QByteArray marker = anchorMatch.captured(2).toUtf8();
+        if (list.ordered)
+            marker = "1.";
+        const QByteArray task = arguments.value(QStringLiteral("task")).toBool()
+                                    ? QByteArray("[ ] ") : QByteArray();
+        QByteArray insertion;
+        if (anchor.endByte > 0 && source.at(anchor.endByte - 1) != '\n')
+            insertion += newline;
+        const QByteArray prefix = anchorMatch.captured(1).toUtf8() + marker + " " + task;
+        QStringList textLines = text.split(QLatin1Char('\n'));
+        QByteArray formatted = textLines.takeFirst().toUtf8();
+        const QByteArray continuationIndent(prefix.size(), ' ');
+        for (const QString &line : textLines)
+            formatted += newline + continuationIndent + line.toUtf8();
+        insertion += prefix + formatted + newline;
+        edits.append(QJsonObject{{QStringLiteral("startByte"), static_cast<double>(anchor.endByte)},
+                      {QStringLiteral("endByte"), static_cast<double>(anchor.endByte)},
+                      {QStringLiteral("text"), QString::fromUtf8(insertion)}});
+    } else if (action == QStringLiteral("toggle_task") || action == QStringLiteral("task_set")) {
         if (node.kind != NodeKind::Item || !node.task)
             return {false, source, QStringLiteral("invalid_action"),
                     QStringLiteral("Only task-list items can change task state."), {}};
@@ -669,6 +879,56 @@ EditResult DocumentEngine::apply(const QByteArray &source, const QString &baseRe
         edits.append(QJsonObject{{QStringLiteral("startByte"), static_cast<double>(offset)},
                       {QStringLiteral("endByte"), static_cast<double>(offset + 1)},
                       {QStringLiteral("text"), checked ? QStringLiteral("x") : QStringLiteral(" ")}});
+    } else if (action == QStringLiteral("attachment_add")) {
+        if (node.kind != NodeKind::Item)
+            return {false, source, QStringLiteral("invalid_action"),
+                    QStringLiteral("Images can only be associated with list items."), {}};
+        const QString path = QDir::cleanPath(arguments.value(QStringLiteral("path")).toString());
+        QString alt = arguments.value(QStringLiteral("alt")).toString().simplified();
+        alt.replace(QLatin1Char('['), QLatin1Char('('));
+        alt.replace(QLatin1Char(']'), QLatin1Char(')'));
+        if (!validAttachmentPath(path))
+            return {false, source, QStringLiteral("invalid_attachment"),
+                    QStringLiteral("Attachment paths must be safe document-relative paths."), {}};
+        if (alt.size() > 120)
+            alt = alt.left(120);
+        if (alt.isEmpty())
+            alt = QStringLiteral("image");
+        if (std::any_of(node.attachments.cbegin(), node.attachments.cend(),
+                        [&](const Attachment &item) { return item.path == path; }))
+            return {false, source, QStringLiteral("invalid_attachment"),
+                    QStringLiteral("That image is already associated with this item."), {}};
+        const QByteArray firstLineWithEnding = source.mid(
+            lines.start(node.startLine), lines.end(node.startLine) - lines.start(node.startLine));
+        const QByteArray newline = firstLineWithEnding.endsWith("\r\n") ? QByteArray("\r\n")
+                                                                          : QByteArray("\n");
+        QByteArray insertion;
+        if (!firstLineWithEnding.endsWith('\n'))
+            insertion += newline;
+        const QByteArray firstLine = lines.bytes(node.startLine);
+        const auto itemMatch = itemPattern.match(QString::fromUtf8(firstLine));
+        const int continuationIndent = itemMatch.hasMatch()
+                                           ? itemMatch.capturedEnd(3)
+                                           : leadingSpaces(firstLine) + 2;
+        insertion += QByteArray(continuationIndent, ' ') + "![" + alt.toUtf8() + "](" +
+                     path.toUtf8() + ")" + newline;
+        edits.append(QJsonObject{{QStringLiteral("startByte"), static_cast<double>(lines.end(node.startLine))},
+                      {QStringLiteral("endByte"), static_cast<double>(lines.end(node.startLine))},
+                      {QStringLiteral("text"), QString::fromUtf8(insertion)}});
+    } else if (action == QStringLiteral("attachment_remove")) {
+        if (node.kind != NodeKind::Item)
+            return {false, source, QStringLiteral("invalid_action"),
+                    QStringLiteral("Images can only be removed from list items."), {}};
+        const QString path = QDir::cleanPath(arguments.value(QStringLiteral("path")).toString());
+        const auto attachment = std::find_if(
+            node.attachments.cbegin(), node.attachments.cend(),
+            [&](const Attachment &item) { return item.path == path; });
+        if (attachment == node.attachments.cend())
+            return {false, source, QStringLiteral("unknown_attachment"),
+                    QStringLiteral("That image is no longer associated with the selected item."), {}};
+        edits.append(QJsonObject{{QStringLiteral("startByte"), static_cast<double>(attachment->startByte)},
+                      {QStringLiteral("endByte"), static_cast<double>(attachment->endByte)},
+                      {QStringLiteral("text"), QString()}});
     } else if (action == QStringLiteral("label_add") || action == QStringLiteral("label_remove")) {
         if (node.id.isEmpty() || node.metadataLine < 1)
             return {false, source, QStringLiteral("tracking_required"),
@@ -700,17 +960,47 @@ EditResult DocumentEngine::apply(const QByteArray &source, const QString &baseRe
             return {false, source, QStringLiteral("unknown_id"),
                     QStringLiteral("The destination no longer exists."), {}};
         const Node &target = document.nodes.at(targetIndex);
-        if (nodeIndex == targetIndex || (target.startByte >= node.startByte && target.endByte <= node.endByte))
+        if (nodeIndex == targetIndex ||
+            (target.startByte >= node.startByte && target.endByte <= node.endByte))
             return {false, source, QStringLiteral("invalid_destination"),
                     QStringLiteral("A node cannot be moved into itself."), {}};
-        if (node.kind != target.kind)
+        const bool nodeIsBlock = node.kind == NodeKind::List || node.kind == NodeKind::Block;
+        const bool targetIsBlock = target.kind == NodeKind::List || target.kind == NodeKind::Block;
+        const bool nodeNeedsBlockSpacing = node.kind != NodeKind::Item;
+        const bool targetNeedsBlockSpacing = target.kind != NodeKind::Item;
+        const auto isSectionBlock = [&](const Node &candidate) {
+            return (candidate.kind == NodeKind::List || candidate.kind == NodeKind::Block) &&
+                   (candidate.parent < 0 ||
+                    document.nodes.at(candidate.parent).kind == NodeKind::Heading);
+        };
+        const bool blockMove = nodeIsBlock && targetIsBlock &&
+                               (node.parent == target.parent ||
+                                (isSectionBlock(node) && isSectionBlock(target)));
+        if (node.kind != target.kind && !blockMove)
             return {false, source, QStringLiteral("invalid_destination"),
                     QStringLiteral("Move destinations must have the same structural kind."), {}};
+        if (nodeIsBlock && targetIsBlock && !blockMove)
+            return {false, source, QStringLiteral("invalid_destination"),
+                    QStringLiteral("Blocks can move between sections only at the document level."), {}};
         if (node.kind == NodeKind::Heading && node.level != target.level)
             return {false, source, QStringLiteral("unsafe_rewrite"),
                     QStringLiteral("Move headings beside another heading of the same level."), {}};
 
-        QByteArray block = source.mid(node.startByte, node.endByte - node.startByte);
+        const auto trailingBlankEnd = [&](qsizetype end) {
+            while (end < source.size()) {
+                qsizetype lineEnd = source.indexOf('\n', end);
+                if (lineEnd < 0)
+                    lineEnd = source.size();
+                const qsizetype next = lineEnd < source.size() ? lineEnd + 1 : lineEnd;
+                if (!source.mid(end, next - end).trimmed().isEmpty())
+                    break;
+                end = next;
+            }
+            return end;
+        };
+        const qsizetype moveEnd = nodeNeedsBlockSpacing ? trailingBlankEnd(node.endByte)
+                                                        : node.endByte;
+        QByteArray block = source.mid(node.startByte, moveEnd - node.startByte);
         if (node.kind == NodeKind::Item) {
             const int delta = leadingSpaces(lines.bytes(target.startLine)) -
                               leadingSpaces(lines.bytes(node.startLine));
@@ -720,9 +1010,21 @@ EditResult DocumentEngine::apply(const QByteArray &source, const QString &baseRe
                 return {false, source, QStringLiteral("unsafe_rewrite"),
                         QStringLiteral("The item indentation cannot be adapted safely."), {}};
         }
-        qsizetype insertion = action == QStringLiteral("move_before") ? target.startByte : target.endByte;
+        const qsizetype targetEnd = targetNeedsBlockSpacing ? trailingBlankEnd(target.endByte)
+                                                            : target.endByte;
+        qsizetype insertion = action == QStringLiteral("move_before") ? target.startByte : targetEnd;
+        if (nodeNeedsBlockSpacing) {
+            const QByteArray newline = source.contains("\r\n") ? QByteArray("\r\n")
+                                                                : QByteArray("\n");
+            const QByteArray before = source.left(insertion);
+            const bool blankBefore = before.endsWith(newline + newline);
+            if (insertion > 0 && !blankBefore)
+                block.prepend(newline);
+            if (!block.endsWith(newline + newline))
+                block.append(newline);
+        }
         edits.append(QJsonObject{{QStringLiteral("startByte"), static_cast<double>(node.startByte)},
-                      {QStringLiteral("endByte"), static_cast<double>(node.endByte)},
+                      {QStringLiteral("endByte"), static_cast<double>(moveEnd)},
                       {QStringLiteral("text"), QString()}});
         edits.append(QJsonObject{{QStringLiteral("startByte"), static_cast<double>(insertion)},
                       {QStringLiteral("endByte"), static_cast<double>(insertion)},
@@ -772,6 +1074,17 @@ EditResult DocumentEngine::apply(const QByteArray &source, const QString &baseRe
         if (scope != QStringLiteral("self") && scope != QStringLiteral("subtree"))
             return {false, source, QStringLiteral("invalid_scope"),
                     QStringLiteral("Scope must be self or subtree."), {}};
+        if (scope == QStringLiteral("self") && action == QStringLiteral("demote")) {
+            int nearestDescendantLevel = 7;
+            for (const Node &candidate : document.nodes) {
+                if (candidate.kind == NodeKind::Heading &&
+                    candidate.startLine > node.startLine && candidate.startLine <= node.endLine)
+                    nearestDescendantLevel = std::min(nearestDescendantLevel, candidate.level);
+            }
+            if (node.level + 1 >= nearestDescendantLevel)
+                return {false, source, QStringLiteral("unsafe_rewrite"),
+                        QStringLiteral("A heading must stay above the headings in its section. Change the whole branch instead."), {}};
+        }
         const qsizetype editEnd = scope == QStringLiteral("self")
                                       ? lines.end(node.startLine) : node.endByte;
         QByteArray block = source.mid(node.startByte, editEnd - node.startByte);
@@ -810,6 +1123,15 @@ EditResult DocumentEngine::apply(const QByteArray &source, const QString &baseRe
         if (requestedLevel < 1 || requestedLevel > 6)
             return {false, source, QStringLiteral("invalid_level"),
                     QStringLiteral("Heading levels run from 1 through 6."), {}};
+        int nearestDescendantLevel = 7;
+        for (const Node &candidate : document.nodes) {
+            if (candidate.kind == NodeKind::Heading &&
+                candidate.startLine > node.startLine && candidate.startLine <= node.endLine)
+                nearestDescendantLevel = std::min(nearestDescendantLevel, candidate.level);
+        }
+        if (requestedLevel >= nearestDescendantLevel)
+            return {false, source, QStringLiteral("unsafe_rewrite"),
+                    QStringLiteral("A heading must stay above the headings in its section. Change the whole branch instead."), {}};
         QByteArray firstLine = lines.bytes(node.startLine);
         const auto match = atxHeadingPattern.match(QString::fromUtf8(firstLine));
         if (!match.hasMatch())
@@ -823,6 +1145,60 @@ EditResult DocumentEngine::apply(const QByteArray &source, const QString &baseRe
         edits.append(QJsonObject{{QStringLiteral("startByte"), static_cast<double>(lines.start(node.startLine))},
                                   {QStringLiteral("endByte"), static_cast<double>(lines.end(node.startLine))},
                                   {QStringLiteral("text"), replacement}});
+    } else if (action == QStringLiteral("replace")) {
+        QString markdown = arguments.value(QStringLiteral("markdown")).toString();
+        if (markdown.contains(QChar::Null) || markdown.toUtf8().size() > 1024 * 1024)
+            return {false, source, QStringLiteral("invalid_text"),
+                    QStringLiteral("Inline Markdown must be smaller than 1 MiB and contain no null bytes."), {}};
+        markdown.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+        if (source.contains("\r\n"))
+            markdown.replace(QLatin1Char('\n'), QStringLiteral("\r\n"));
+        const QByteArray replacement = markdown.toUtf8();
+        const Document candidate = parse(replacement);
+        int candidateIndex = -1;
+        if (node.kind == NodeKind::Item) {
+            for (int index = 0; index < candidate.nodes.size(); ++index) {
+                const Node &possible = candidate.nodes.at(index);
+                if (possible.kind != NodeKind::Item || possible.parent < 0)
+                    continue;
+                const Node &parent = candidate.nodes.at(possible.parent);
+                if (parent.kind != NodeKind::List || parent.parent >= 0)
+                    continue;
+                int rootItems = 0;
+                for (int child : parent.children) {
+                    if (candidate.nodes.at(child).kind == NodeKind::Item)
+                        ++rootItems;
+                }
+                if (rootItems == 1) {
+                    candidateIndex = index;
+                    break;
+                }
+            }
+        } else {
+            for (int index = 0; index < candidate.nodes.size(); ++index) {
+                const Node &possible = candidate.nodes.at(index);
+                if (possible.kind == node.kind && possible.parent < 0) {
+                    candidateIndex = index;
+                    break;
+                }
+            }
+        }
+        if (candidateIndex < 0)
+            return {false, source, QStringLiteral("invalid_structure"),
+                    QStringLiteral("The edited Markdown must remain one structure of the same type."), {}};
+        const Node &replacementNode = candidate.nodes.at(candidateIndex);
+        if (node.kind == NodeKind::Heading && replacementNode.level != node.level)
+            return {false, source, QStringLiteral("invalid_structure"),
+                    QStringLiteral("Use the heading controls to change its level."), {}};
+        qsizetype consumed = replacementNode.endByte;
+        if (node.kind == NodeKind::Item && replacementNode.parent >= 0)
+            consumed = candidate.nodes.at(replacementNode.parent).endByte;
+        if (!replacement.mid(consumed).trimmed().isEmpty())
+            return {false, source, QStringLiteral("invalid_structure"),
+                    QStringLiteral("The edited Markdown would create more than one peer structure."), {}};
+        edits.append(QJsonObject{{QStringLiteral("startByte"), static_cast<double>(node.startByte)},
+                                  {QStringLiteral("endByte"), static_cast<double>(node.endByte)},
+                                  {QStringLiteral("text"), markdown}});
     } else if (action == QStringLiteral("edit")) {
         const QString text = arguments.value(QStringLiteral("text")).toString();
         if (text.contains(QLatin1Char('\n')))
@@ -863,15 +1239,48 @@ EditResult DocumentEngine::apply(const QByteArray &source, const QString &baseRe
     EditResult result = applyEdits(source, edits);
     if (!result.ok)
         return result;
-    if (document.tracked) {
-        const EditResult completedTracking = track(result.source);
-        if (!completedTracking.ok)
-            return completedTracking;
-        result.source = completedTracking.source;
-        for (const QJsonValue &edit : completedTracking.edits)
-            result.edits.append(edit);
+    const bool renumberItems = action == QStringLiteral("item_add") ||
+        (node.kind == NodeKind::Item &&
+         (action == QStringLiteral("delete") || action == QStringLiteral("move_before") ||
+          action == QStringLiteral("move_after") || action == QStringLiteral("promote") ||
+          action == QStringLiteral("demote") || action == QStringLiteral("indent") ||
+          action == QStringLiteral("outdent")));
+    if (renumberItems) {
+        const QByteArray renumbered = renumberOrderedLists(
+            result.source, affectedOrderedOrdinal, affectedOrderedStart);
+        if (renumbered != result.source) {
+            result.source = renumbered;
+            qsizetype commonPrefix = 0;
+            while (commonPrefix < source.size() && commonPrefix < result.source.size() &&
+                   source.at(commonPrefix) == result.source.at(commonPrefix))
+                ++commonPrefix;
+            qsizetype commonSuffix = 0;
+            while (commonSuffix < source.size() - commonPrefix &&
+                   commonSuffix < result.source.size() - commonPrefix &&
+                   source.at(source.size() - commonSuffix - 1) ==
+                       result.source.at(result.source.size() - commonSuffix - 1))
+                ++commonSuffix;
+            result.edits = QJsonArray{QJsonObject{
+                {QStringLiteral("startByte"), static_cast<double>(commonPrefix)},
+                {QStringLiteral("endByte"), static_cast<double>(source.size() - commonSuffix)},
+                {QStringLiteral("text"), QString::fromUtf8(result.source.mid(
+                     commonPrefix, result.source.size() - commonPrefix - commonSuffix))},
+            }};
+        }
     }
     const Document reparsed = parse(result.source);
+    if (action == QStringLiteral("move_before") || action == QStringLiteral("move_after")) {
+        const auto countKind = [](const Document &value, NodeKind kind) {
+            return std::count_if(value.nodes.cbegin(), value.nodes.cend(),
+                                 [kind](const Node &candidate) { return candidate.kind == kind; });
+        };
+        for (const NodeKind kind : {NodeKind::Heading, NodeKind::List,
+                                    NodeKind::Item, NodeKind::Block}) {
+            if (countKind(document, kind) != countKind(reparsed, kind))
+                return {false, source, QStringLiteral("unsafe_rewrite"),
+                        QStringLiteral("The move would change the Markdown structure."), {}};
+        }
+    }
     if (!node.id.isEmpty() && action != QStringLiteral("delete") &&
         reparsed.findNode(node.id) < 0)
         return {false, source, QStringLiteral("unsafe_rewrite"),

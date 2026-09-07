@@ -1,0 +1,4 @@
+/* Keep the existing theme and layout; only adjust three accent colors. */
+h1, h2, h3 { color: #83c5be !important; }
+a { color: #e9c46a !important; }
+blockquote { border-left-color: #83c5be !important; }

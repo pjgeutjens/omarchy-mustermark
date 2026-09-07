@@ -6,7 +6,12 @@ Comment=Write and reorganise Markdown headings and lists
 Exec=mustermark %f
 Icon=mustermark
 Terminal=false
-Categories=Office;TextEditor;
+Categories=Utility;TextEditor;
 MimeType=text/markdown;text/x-markdown;text/plain;
 Keywords=markdown;headings;lists;tasks;editor;
 StartupWMClass=mustermark
+Actions=Append;
+
+[Desktop Action Append]
+Name=Append item in Visual Mode
+Exec=mustermark append %f
